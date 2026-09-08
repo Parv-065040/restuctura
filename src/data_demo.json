@@ -1,0 +1,232 @@
+{
+  "_label": "FICTIONAL TEST DATA \u2014 NOT A REAL FINANCIAL RECORD",
+  "businessName": "Shree Balaji Engineering Works",
+  "business": {
+    "type": "Manufacturing",
+    "monthlySales": 2000000,
+    "monthlyExpenses": 1680000,
+    "customersPayingLate": "Yes",
+    "receivablesAmount": 950000,
+    "incomeOutlook": "Stay similar",
+    "cashReserve": 350000
+  },
+  "loans": [
+    {
+      "id": "loan_1",
+      "lender": "HDFC Bank",
+      "loanType": "Business loan",
+      "outstandingAmount": 2800000,
+      "emi": 78500,
+      "remainingTenure": 36,
+      "remainingTenureUnit": "months",
+      "interestRatePct": 13.5,
+      "secured": "Yes"
+    },
+    {
+      "id": "loan_2",
+      "lender": "Bajaj Finserv",
+      "loanType": "Machinery/equipment loan",
+      "outstandingAmount": 1200000,
+      "emi": 42000,
+      "remainingTenure": 30,
+      "remainingTenureUnit": "months",
+      "interestRatePct": 15.0,
+      "secured": "Yes"
+    },
+    {
+      "id": "loan_3",
+      "lender": "ICICI Bank",
+      "loanType": "Cash credit/overdraft",
+      "outstandingAmount": 600000,
+      "emi": 18000,
+      "remainingTenure": 24,
+      "remainingTenureUnit": "months",
+      "interestRatePct": 14.0,
+      "secured": "No"
+    }
+  ],
+  "mainProblem": "Customers haven't paid me yet",
+  "urgency": "In the next 1-3 months",
+  "documents": [
+    {
+      "documentType": "bank_statement",
+      "fileName": "bank_statement_6month.txt",
+      "fields": [
+        {
+          "field": "accountHolderName",
+          "value": "Shree Balaji Engineering Works",
+          "source": "bank_statement",
+          "confidence": "HIGH"
+        },
+        {
+          "field": "statementPeriod",
+          "value": "01-Feb-2026 to 31-Jul-2026",
+          "source": "bank_statement",
+          "confidence": "HIGH"
+        },
+        {
+          "field": "openingBalance",
+          "value": 380000,
+          "source": "bank_statement",
+          "confidence": "HIGH"
+        },
+        {
+          "field": "closingBalance",
+          "value": 350000,
+          "source": "bank_statement",
+          "confidence": "HIGH"
+        },
+        {
+          "field": "identifiedEMIDebits_HDFC",
+          "value": 78500,
+          "source": "bank_statement",
+          "confidence": "MEDIUM"
+        },
+        {
+          "field": "identifiedEMIDebits_Bajaj",
+          "value": 42000,
+          "source": "bank_statement",
+          "confidence": "MEDIUM"
+        },
+        {
+          "field": "identifiedEMIDebits_ICICI",
+          "value": 18000,
+          "source": "bank_statement",
+          "confidence": "MEDIUM"
+        }
+      ]
+    },
+    {
+      "documentType": "loan_statement",
+      "fileName": "loan_statement_hdfc.txt",
+      "fields": [
+        {
+          "field": "lender",
+          "value": "HDFC Bank",
+          "source": "loan_statement",
+          "confidence": "HIGH"
+        },
+        {
+          "field": "outstandingAmount",
+          "value": 2800000,
+          "source": "loan_statement",
+          "confidence": "HIGH"
+        },
+        {
+          "field": "emi",
+          "value": 78500,
+          "source": "loan_statement",
+          "confidence": "HIGH"
+        },
+        {
+          "field": "interestRatePct",
+          "value": 13.5,
+          "source": "loan_statement",
+          "confidence": "HIGH"
+        },
+        {
+          "field": "remainingTenureMonths",
+          "value": 36,
+          "source": "loan_statement",
+          "confidence": "HIGH"
+        }
+      ]
+    },
+    {
+      "documentType": "loan_statement",
+      "fileName": "loan_statement_bajaj.txt",
+      "fields": [
+        {
+          "field": "lender",
+          "value": "Bajaj Finserv",
+          "source": "loan_statement",
+          "confidence": "HIGH"
+        },
+        {
+          "field": "outstandingAmount",
+          "value": 1200000,
+          "source": "loan_statement",
+          "confidence": "HIGH"
+        },
+        {
+          "field": "emi",
+          "value": 42000,
+          "source": "loan_statement",
+          "confidence": "HIGH"
+        },
+        {
+          "field": "interestRatePct",
+          "value": 15.0,
+          "source": "loan_statement",
+          "confidence": "HIGH"
+        },
+        {
+          "field": "remainingTenureMonths",
+          "value": 30,
+          "source": "loan_statement",
+          "confidence": "HIGH"
+        }
+      ]
+    },
+    {
+      "documentType": "loan_statement",
+      "fileName": "loan_statement_icici.txt",
+      "fields": [
+        {
+          "field": "lender",
+          "value": "ICICI Bank",
+          "source": "loan_statement",
+          "confidence": "HIGH"
+        },
+        {
+          "field": "outstandingAmount",
+          "value": 600000,
+          "source": "loan_statement",
+          "confidence": "HIGH"
+        },
+        {
+          "field": "emi",
+          "value": 18000,
+          "source": "loan_statement",
+          "confidence": "HIGH"
+        },
+        {
+          "field": "interestRatePct",
+          "value": 14.0,
+          "source": "loan_statement",
+          "confidence": "HIGH"
+        },
+        {
+          "field": "remainingTenureMonths",
+          "value": 24,
+          "source": "loan_statement",
+          "confidence": "HIGH"
+        }
+      ]
+    },
+    {
+      "documentType": "gst_sales_summary",
+      "fileName": "gst_sales_summary.txt",
+      "fields": [
+        {
+          "field": "avgMonthlyReportedTurnover",
+          "value": 2033000,
+          "source": "gst_summary",
+          "confidence": "MEDIUM"
+        }
+      ]
+    },
+    {
+      "documentType": "receivables_list",
+      "fileName": "receivables_list.txt",
+      "fields": [
+        {
+          "field": "totalReceivables",
+          "value": 950000,
+          "source": "receivables_list",
+          "confidence": "HIGH"
+        }
+      ]
+    }
+  ]
+}

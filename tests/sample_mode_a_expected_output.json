@@ -1,0 +1,70 @@
+{
+  "validation": {
+    "isValid": true,
+    "errors": [],
+    "warnings": []
+  },
+  "reconciliationResults": [
+    {
+      "conflicts": [],
+      "confirmations": [],
+      "hasConflicts": false
+    },
+    {
+      "conflicts": [],
+      "confirmations": [],
+      "hasConflicts": false
+    },
+    {
+      "conflicts": [],
+      "confirmations": [],
+      "hasConflicts": false
+    },
+    {
+      "conflicts": [],
+      "confirmations": [],
+      "hasConflicts": false
+    },
+    {
+      "conflicts": [],
+      "confirmations": [],
+      "hasConflicts": false
+    },
+    {
+      "conflicts": [],
+      "confirmations": [],
+      "hasConflicts": false
+    }
+  ],
+  "fin": {
+    "totalMonthlyEMI": 138500,
+    "totalOutstandingDebt": 4600000,
+    "missingEMICount": 0,
+    "availableAfterExpenses": 320000,
+    "availableAfterEMI": 181500,
+    "internalDSCR": 2.31,
+    "emiToSalesRatio": 0.07,
+    "emiToAvailableRatio": 0.43,
+    "cashBufferMonths": 2.53,
+    "receivablesRatio": 0.48,
+    "debtConcentration": "CONCENTRATED",
+    "weightedAvgInterestRate": 13.96,
+    "interestRateAssumed": false,
+    "weightedAvgTenureMonths": 33,
+    "tenureAssumed": false,
+    "comfortableEMIRange": {
+      "lower": 128000,
+      "upper": 176000,
+      "basis": "Illustrative safety-cushion calculation: 40%-55% of estimated money left after business expenses. Not a lender-approved affordability limit."
+    }
+  },
+  "classifications": [
+    "WATCH",
+    "TEMPORARY_LIQUIDITY_STRESS",
+    "MULTIPLE_LOAN_COMPLEXITY"
+  ],
+  "dataConfidence": {
+    "score": 100,
+    "level": "HIGH"
+  }
+}

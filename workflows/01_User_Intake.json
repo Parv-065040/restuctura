@@ -1,0 +1,85 @@
+{
+  "name": "Module - 01 User Intake",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "restructra/user-intake",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "m1",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "restructra-user-intake"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// n8n Code node — \"01-03: Intake, Documents, Reconciliation\"\n// Mode: Run Once for All Items. Expects the webhook body at items[0].json.body\n// (Mode A: direct JSON; Mode B: same shape produced by the questionnaire frontend).\n//\n// NOTE ON DOCUMENT PROCESSING (see README \"Known Limitations\"):\n// RESTRUCTRA does not ship its own OCR/PDF-parsing model. Each item in\n// `documents[]` is expected to already carry a `fields[]` array — the output\n// of an extraction step (an OCR + LLM extraction call, or a human-reviewed\n// upload). This keeps the deterministic engine identical whether the fields\n// came from a real extraction pipeline or from the bundled sample documents.\n// A placeholder HTTP Request node (\"Document Extraction (OCR/LLM)\") is\n// provided upstream of this node in the modular version for teams who want\n// to wire in a real extraction service (Textract, Azure Doc Intelligence,\n// an LLM vision call, etc.) — see docs/ARCHITECTURE.md §Document Processing.\n\nconst raw = $input.first().json.body || $input.first().json;\n\n// ---------- normalize ----------\nfunction toNumberOrNull(v) {\n  if (v === null || v === undefined || v === '' || v === \"I don't know\" || v === 'Not sure') return null;\n  const n = typeof v === 'number' ? v : Number(String(v).replace(/[₹,\\s]/g, ''));\n  return Number.isFinite(n) ? n : null;\n}\nfunction normalizeTenure(value, unit) {\n  const n = toNumberOrNull(value);\n  if (n === null) return null;\n  if (unit === 'years') return Math.round(n * 12);\n  return Math.round(n);\n}\nfunction normalizeInput(r) {\n  return {\n    business: {\n      type: r?.business?.type ?? null,\n      monthlySales: toNumberOrNull(r?.business?.monthlySales),\n      monthlyExpenses: toNumberOrNull(r?.business?.monthlyExpenses),\n      customersPayingLate: r?.business?.customersPayingLate ?? 'Not sure',\n      receivablesAmount: toNumberOrNull(r?.business?.receivablesAmount),\n      incomeOutlook: r?.business?.incomeOutlook ?? 'Not sure',\n      cashReserve: toNumberOrNull(r?.business?.cashReserve),\n    },\n    loans: Array.isArray(r?.loans)\n      ? r.loans.map((l, i) => ({\n          id: l.id || `loan_${i + 1}`,\n          lender: l.lender ?? null,\n          loanType: l.loanType ?? \"Don't know\",\n          outstandingAmount: toNumberOrNull(l.outstandingAmount),\n          emi: toNumberOrNull(l.emi),\n          remainingTenureMonths: normalizeTenure(l.remainingTenure, l.remainingTenureUnit),\n          interestRatePct: toNumberOrNull(l.interestRatePct),\n          secured: l.secured ?? null,\n        }))\n      : [],\n    mainProblem: r?.mainProblem ?? \"I'm not sure\",\n    urgency: r?.urgency ?? \"I'm not sure\",\n    documents: Array.isArray(r?.documents) ? r.documents : [],\n    businessName: r?.businessName ?? null,\n  };\n}\n\n// ---------- validate ----------\nfunction validateInput(data) {\n  const errors = [];\n  const warnings = [];\n  if (data.business.monthlySales === null) warnings.push({ field: 'monthlySales', message: 'Monthly sales not provided.' });\n  if (data.business.monthlyExpenses === null) warnings.push({ field: 'monthlyExpenses', message: 'Monthly expenses not provided.' });\n  if (data.business.monthlySales !== null && data.business.monthlySales < 0) errors.push({ field: 'monthlySales', message: 'Monthly sales cannot be negative.' });\n  if (data.business.monthlyExpenses !== null && data.business.monthlyExpenses < 0) errors.push({ field: 'monthlyExpenses', message: 'Monthly expenses cannot be negative.' });\n  if (!Array.isArray(data.loans) || data.loans.length === 0) {\n    warnings.push({ field: 'loans', message: 'No loans provided.' });\n  } else {\n    data.loans.forEach((l) => {\n      if (l.emi === null) warnings.push({ field: `${l.id}.emi`, message: `EMI missing for loan ${l.id}.` });\n      if (l.outstandingAmount === null) warnings.push({ field: `${l.id}.outstandingAmount`, message: `Outstanding amount missing for loan ${l.id}.` });\n      if (l.emi !== null && l.emi < 0) errors.push({ field: `${l.id}.emi`, message: 'EMI cannot be negative.' });\n      if (l.outstandingAmount !== null && l.outstandingAmount < 0) errors.push({ field: `${l.id}.outstandingAmount`, message: 'Outstanding amount cannot be negative.' });\n      if (l.interestRatePct !== null && (l.interestRatePct < 0 || l.interestRatePct > 60)) errors.push({ field: `${l.id}.interestRatePct`, message: 'Interest rate looks invalid.' });\n    });\n  }\n  return { isValid: errors.length === 0, errors, warnings };\n}\n\n// ---------- reconciliation ----------\nfunction sumEMI(loans) {\n  const known = (loans || []).filter((l) => l.emi !== null);\n  if (known.length === 0) return null;\n  return known.reduce((s, l) => s + l.emi, 0);\n}\nfunction sumOutstanding(loans) {\n  const known = (loans || []).filter((l) => l.outstandingAmount !== null);\n  if (known.length === 0) return null;\n  return known.reduce((s, l) => s + l.outstandingAmount, 0);\n}\nfunction reconcile(userData, extractedDoc) {\n  const conflicts = [];\n  const confirmations = [];\n  if (!extractedDoc || extractedDoc.extractionFailed || !Array.isArray(extractedDoc.fields) || extractedDoc.fields.length === 0) {\n    return {\n      documentType: extractedDoc?.documentType || 'unknown',\n      fileName: extractedDoc?.fileName || null,\n      conflicts,\n      confirmations,\n      hasConflicts: false,\n      extractionFailed: !!extractedDoc?.extractionFailed || (extractedDoc && extractedDoc.fields && extractedDoc.fields.length === 0),\n    };\n  }\n  const TOLERANCE = 0.03;\n  const userLookup = {\n    monthlyEMI: sumEMI(userData.loans),\n    totalOutstanding: sumOutstanding(userData.loans),\n    monthlySales: userData.business.monthlySales,\n  };\n  extractedDoc.fields.forEach((f) => {\n    if (!(f.field in userLookup)) return;\n    const userValue = userLookup[f.field];\n    const docValue = toNumberOrNull(f.value);\n    if (userValue === null || docValue === null) return;\n    const diffRatio = userValue === 0 ? (docValue === 0 ? 0 : 1) : Math.abs(userValue - docValue) / Math.abs(userValue);\n    const record = {\n      field: f.field,\n      userValue,\n      documentValue: docValue,\n      source: f.source,\n      confidence: f.confidence,\n      diffPct: Math.round(diffRatio * 1000) / 10,\n    };\n    if (diffRatio > TOLERANCE) conflicts.push({ ...record, status: 'CONFLICT', actionRequired: true });\n    else confirmations.push({ ...record, status: 'CONFIRMED', actionRequired: false });\n  });\n  return {\n    documentType: extractedDoc.documentType || 'unknown',\n    fileName: extractedDoc.fileName || null,\n    conflicts,\n    confirmations,\n    hasConflicts: conflicts.length > 0,\n    extractionFailed: false,\n  };\n}\n\n// ---------- run ----------\nconst data = normalizeInput(raw);\nconst validation = validateInput(data);\nconst reconciliationResults = (data.documents || []).map((doc) => reconcile(data, doc));\nconst anyExtractionFailed = reconciliationResults.some((r) => r.extractionFailed);\nconst anyConflicts = reconciliationResults.some((r) => r.hasConflicts);\n\nreturn [\n  {\n    json: {\n      data,\n      validation,\n      reconciliationResults,\n      anyExtractionFailed,\n      anyConflicts,\n    },\n  },\n];\n"
+      },
+      "id": "m2",
+      "name": "01 User Intake",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "m3",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        520,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "01 User Intake",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "01 User Intake": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "restructra-demo"
+  }
+}

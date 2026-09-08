@@ -1,0 +1,161 @@
+{
+  "name": "Module - 08 Bank Ready Report",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "restructra/bank-ready-report",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "m27",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "restructra-bank-ready-report"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// n8n Code node — \"Build Bank Report Prompt\"\n\nconst input = $input.first().json.body || $input.first().json;\nconst { data, fin, scenarioBundle, classifications, recommendation } = input;\n\nconst systemPrompt = `You are the report-writing layer of RESTRUCTRA. Produce a \"Bank-Ready Discussion Plan\" for an MSME owner to take to their lender.\n\nSTRICT RULES (identical to the recommendation step):\n1. Only use numbers found in ENGINE_OUTPUT or in RECOMMENDATION (already-validated). Never invent numbers.\n2. Never guarantee approval, an interest rate, or any lender decision.\n3. Never claim to know a specific lender's internal policy.\n4. Keep tone evidence-based and professional — suitable to hand to a bank relationship manager.\n5. Return ONLY valid JSON, no markdown fences.\n\nOUTPUT SCHEMA (all fields are strings unless noted; arrays of strings are bullet points):\n{\n  \"title\": \"MSME Loan Restructuring Discussion Plan\",\n  \"businessSituation\": \"string\",\n  \"currentRepaymentSituation\": \"string\",\n  \"mainReasonForPressure\": \"string\",\n  \"estimatedComfortableRepaymentRange\": \"string\",\n  \"recommendedOption\": \"string\",\n  \"alternativeOptions\": [\"string\"],\n  \"whyRecommendationMakesSense\": \"string\",\n  \"risksAndTradeoffs\": [\"string\"],\n  \"evidenceSupportingRequest\": [\"string\"],\n  \"documentsToTakeToLender\": [\"string\"],\n  \"questionsLenderMayAsk\": [\"string\"],\n  \"suggestedEvidenceBasedResponses\": [\"string\"],\n  \"nextSteps\": [\"string\"],\n  \"disclaimer\": \"string\"\n}`;\n\nconst userPrompt = `ENGINE_OUTPUT:\n${JSON.stringify({ business: data.business, loans: data.loans, fin, scenarios: scenarioBundle.scenarios, classifications }, null, 2)}\n\nRECOMMENDATION (already generated and validated in the previous step):\n${JSON.stringify(recommendation, null, 2)}\n\nWrite the Bank-Ready Discussion Plan JSON described in the system prompt, consistent with the recommendation above.`;\n\nreturn [{\n  json: {\n    ...input,\n    bankReportRequest: {\n      model: 'claude-sonnet-4-6',\n      max_tokens: 2000,\n      system: systemPrompt,\n      messages: [{ role: 'user', content: userPrompt }],\n    },\n  },\n}];\n"
+      },
+      "id": "m24",
+      "name": "Build Bank Report Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.bankReportRequest) }}",
+        "options": {}
+      },
+      "id": "m25",
+      "name": "AI Bank Report (Anthropic)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        520,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Anthropic API Key (x-api-key header)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// n8n Code node — \"Validate & Parse Bank Report (fail-closed)\"\n//\n// DATA-FLOW NOTE (fix): after the \"AI Bank Report\" HTTP Request node runs,\n// $input.first().json is the Anthropic HTTP response — NOT the deterministic\n// engine output or the already-validated recommendation. Both must be\n// fetched explicitly from the node that produced them, by name, via\n// $node[...]. The placeholder Build Bank Report Prompt below is\n// substituted at build time (see workflows/build_workflow.js /\n// build_modules.js) with the exact name of the upstream node that carries\n// {data, fin, scenarioBundle, classifications, dataConfidence,\n// reconciliationResults, recommendation, recommendationValidation} for\n// whichever workflow this file is assembled into.\n//\n// If ANY validation check fails, we do NOT fabricate a fallback report with\n// invented numbers — we fail closed to a deterministic, engine-only summary.\n\nconst httpResponse = $input.first().json;\nconst priorContext = ($node[\"Build Bank Report Prompt\"] && $node[\"Build Bank Report Prompt\"].json) || {};\nconst { data, validation, reconciliationResults, fin, scenarioBundle, classifications, dataConfidence, recommendation, recommendationValidation } = priorContext;\n\nfunction extractText(httpResponse) {\n  try {\n    const content = httpResponse?.content || httpResponse?.body?.content;\n    if (!Array.isArray(content)) return null;\n    const textBlock = content.find((b) => b.type === 'text');\n    return textBlock ? textBlock.text : null;\n  } catch (e) { return null; }\n}\nfunction safeParseJSON(text) {\n  if (!text) return null;\n  const cleaned = text.replace(/```json/gi, '').replace(/```/g, '').trim();\n  try { return JSON.parse(cleaned); } catch (e) { return null; }\n}\nfunction collectEngineNumbers(fin, scenarioBundle) {\n  const nums = [];\n  const push = (v) => { if (typeof v === 'number' && Number.isFinite(v)) nums.push(Math.round(v)); };\n  Object.values(fin || {}).forEach((v) => push(v));\n  if (fin?.comfortableEMIRange) { push(fin.comfortableEMIRange.lower); push(fin.comfortableEMIRange.upper); }\n  const walk = (obj) => { if (!obj || typeof obj !== 'object') return; Object.values(obj).forEach((v) => { if (typeof v === 'number') push(v); else if (typeof v === 'object') walk(v); }); };\n  walk(scenarioBundle?.scenarios);\n  return nums;\n}\nfunction extractNumbersFromText(text) {\n  const matches = text.match(/-?\\d{3,}(\\.\\d+)?/g) || [];\n  return matches.map((m) => Math.round(Number(m))).filter((n) => Number.isFinite(n));\n}\n\nconst REQUIRED_SECTIONS = ['title', 'businessSituation', 'currentRepaymentSituation', 'mainReasonForPressure', 'estimatedComfortableRepaymentRange', 'recommendedOption', 'alternativeOptions', 'whyRecommendationMakesSense', 'risksAndTradeoffs', 'evidenceSupportingRequest', 'documentsToTakeToLender', 'questionsLenderMayAsk', 'suggestedEvidenceBasedResponses', 'nextSteps', 'disclaimer'];\n\nfunction validateBankReport(report, fin, scenarioBundle) {\n  const errors = [];\n  if (!report || typeof report !== 'object') return { valid: false, errors: ['Bank report is not valid JSON.'] };\n  REQUIRED_SECTIONS.forEach((k) => { if (!(k in report)) errors.push(`Missing section: ${k}`); });\n\n  const bannedPhrases = ['guarantee', 'guaranteed', 'will be approved', 'assured approval', 'promise'];\n  const allText = JSON.stringify(report).toLowerCase();\n  bannedPhrases.forEach((p) => { if (allText.includes(p)) errors.push(`Bank report contains a disallowed guarantee-style phrase: \"${p}\".`); });\n\n  const engineNumbers = collectEngineNumbers(fin, scenarioBundle);\n  const citedNumbers = extractNumbersFromText(JSON.stringify(report));\n  const unverifiable = citedNumbers.filter((n) => !engineNumbers.some((e) => Math.abs(e - n) < Math.max(1, e * 0.01)));\n  const materialUnverifiable = unverifiable.filter((n) => n > 100);\n  if (materialUnverifiable.length > 0) errors.push(`Bank report cites figures not found in engine output: ${materialUnverifiable.slice(0, 5).join(', ')}`);\n\n  if (!fin) errors.push('Deterministic engine context unavailable — cannot verify bank report output.');\n\n  return { valid: errors.length === 0, errors };\n}\n\nfunction buildFailClosedReport(fin, recommendation) {\n  // Every field uses optional chaining / nullish coalescing so this can never throw,\n  // even if the upstream context could not be retrieved at all.\n  return {\n    aiUnavailable: true,\n    title: 'MSME Loan Restructuring Discussion Plan (Basic Version)',\n    businessSituation: 'Automated narrative could not be safely verified this time. Figures below are from the deterministic financial engine and are accurate.',\n    currentRepaymentSituation: `Total monthly EMI: Rs. ${fin?.totalMonthlyEMI ?? 'N/A'}. Estimated money left after expenses: Rs. ${fin?.availableAfterExpenses ?? 'N/A'}.`,\n    mainReasonForPressure: 'Not available in fallback mode — see detailed financial view.',\n    estimatedComfortableRepaymentRange: fin?.comfortableEMIRange ? `Rs. ${fin.comfortableEMIRange.lower} to Rs. ${fin.comfortableEMIRange.upper} (illustrative).` : 'Not available.',\n    recommendedOption: recommendation?.primaryRecommendation?.title || 'See detailed financial view.',\n    alternativeOptions: [],\n    whyRecommendationMakesSense: 'Not available in fallback mode.',\n    risksAndTradeoffs: ['This is a fallback summary generated without AI narrative. Please review the full numbers before your lender meeting.'],\n    evidenceSupportingRequest: [],\n    documentsToTakeToLender: ['Last 6 months bank statement', 'Latest loan statement(s)', 'GST/sales summary (if available)'],\n    questionsLenderMayAsk: [],\n    suggestedEvidenceBasedResponses: [],\n    nextSteps: ['Review the detailed financial view', 'Consult a Chartered Accountant if numbers are unclear', 'Contact your lender to discuss options'],\n    disclaimer: 'This is an estimate based on the information provided. It is not a loan approval, lender decision, or financial guarantee of any kind.',\n  };\n}\n\nconst text = extractText(httpResponse);\nconst parsed = safeParseJSON(text);\nconst validation2 = validateBankReport(parsed, fin, scenarioBundle);\nconst bankReport = validation2.valid ? parsed : buildFailClosedReport(fin, recommendation);\n\nreturn [{\n  json: {\n    data,\n    validation,\n    reconciliationResults,\n    fin,\n    scenarioBundle,\n    classifications,\n    dataConfidence,\n    recommendation,\n    recommendationValidation,\n    bankReport,\n    bankReportValidation: validation2,\n  },\n}];\n"
+      },
+      "id": "m26",
+      "name": "Validate & Parse Bank Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { bankReport: $json.bankReport, validation: $json.bankReportValidation } }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "m28",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1040,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Build Bank Report Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Bank Report Prompt": {
+      "main": [
+        [
+          {
+            "node": "AI Bank Report (Anthropic)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Bank Report (Anthropic)": {
+      "main": [
+        [
+          {
+            "node": "Validate & Parse Bank Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Parse Bank Report": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "restructra-demo"
+  }
+}

@@ -1,0 +1,161 @@
+{
+  "name": "Module - 07 AI Recommendation",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "restructra/ai-recommendation",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "m22",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "restructra-ai-recommendation"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// n8n Code node — \"Build Recommendation Prompt\"\n// Produces the exact system+user prompt sent to the LLM. The LLM is never\n// given raw permission to invent numbers — every figure it may reference is\n// pre-computed and handed to it as the \"ENGINE_OUTPUT\" JSON block.\n\nconst input = $input.first().json.body || $input.first().json;\nconst { data, fin, scenarioBundle, classifications, dataConfidence, reconciliationResults } = input;\n\nconst systemPrompt = `You are the explanation layer of RESTRUCTRA, a financial decision-support tool for Indian MSME owners.\nYou are NOT a lender, NOT a CA, and NOT authorized to guarantee any outcome.\n\nSTRICT RULES:\n1. You may only use numbers that appear in the ENGINE_OUTPUT JSON given to you. Never invent, round differently, or recalculate a figure.\n2. You must return EXACTLY ONE \"primaryRecommendation\" plus arrays \"alternativeOptions\" and \"notPreferredOptions\".\n3. Never use the words \"guarantee\", \"guaranteed\", \"assured\", \"promise\", or claim the lender \"will\" approve anything.\n4. Every scenario you mention must be labelled as illustrative/an estimate, not a lender-confirmed offer.\n5. If STRUCTURAL_CASH_FLOW_PROBLEM is present in classifications, you must state clearly that restructuring alone may not solve the underlying issue, and suggest the owner also look at the operating business problem.\n6. If classifications is exactly [\"HEALTHY\"], your primaryRecommendation must be to continue monitoring — do not recommend restructuring.\n7. Write in simple, plain language a non-finance small-business owner can understand. Avoid jargon (no \"DSCR\", \"amortization\", etc. in the primary explanation — those may appear only inside a \"technicalDetails\" field).\n8. Return ONLY valid JSON matching the schema below. No markdown, no commentary, no code fences.\n\nOUTPUT SCHEMA:\n{\n  \"summaryForOwner\": \"string, 2-4 plain sentences\",\n  \"primaryRecommendation\": { \"title\": \"string\", \"explanation\": \"string\", \"supportingNumbers\": [\"string referencing ENGINE_OUTPUT values only\"] },\n  \"alternativeOptions\": [ { \"title\": \"string\", \"explanation\": \"string\" } ],\n  \"notPreferredOptions\": [ { \"title\": \"string\", \"reasonNotPreferred\": \"string\" } ],\n  \"risksAndTradeoffs\": [\"string\"],\n  \"technicalDetails\": { \"internalDSCR\": number|null, \"emiToAvailableRatio\": number|null, \"note\": \"string\" },\n  \"disclaimer\": \"string — must state this is an estimate, not a lender decision, approval, or guarantee\"\n}`;\n\nconst userPrompt = `ENGINE_OUTPUT (the only source of numbers you may use):\n${JSON.stringify({ business: data.business, loans: data.loans, mainProblem: data.mainProblem, urgency: data.urgency, fin, scenarios: scenarioBundle.scenarios, stressAssumptions: scenarioBundle.stressAssumptions, classifications, dataConfidence, reconciliationConflicts: reconciliationResults.flatMap(r => r.conflicts) }, null, 2)}\n\nUsing ONLY the numbers above, write the recommendation JSON described in the system prompt.`;\n\nreturn [{\n  json: {\n    ...input,\n    aiRequest: {\n      model: 'claude-sonnet-4-6',\n      max_tokens: 1500,\n      system: systemPrompt,\n      messages: [{ role: 'user', content: userPrompt }],\n    },\n  },\n}];\n"
+      },
+      "id": "m19",
+      "name": "Build Recommendation Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.aiRequest) }}",
+        "options": {}
+      },
+      "id": "m20",
+      "name": "AI Recommendation (Anthropic)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        520,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Anthropic API Key (x-api-key header)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// n8n Code node — \"Validate & Parse Recommendation (fail-closed)\"\n//\n// DATA-FLOW NOTE (fix): after the \"AI Recommendation\" HTTP Request node runs,\n// $input.first().json is the Anthropic HTTP response — NOT the deterministic\n// engine output. The engine output must be fetched explicitly from the node\n// that produced it, by name, via $node[...]. The placeholder\n// Build Recommendation Prompt below is substituted at build time\n// (see workflows/build_workflow.js / build_modules.js) with the exact name\n// of the upstream node that carries {data, fin, scenarioBundle,\n// classifications, dataConfidence, reconciliationResults} for whichever\n// workflow this file is assembled into.\n//\n// If ANY validation check fails, we do NOT fabricate a fallback\n// recommendation with invented numbers — we fail closed to a deterministic,\n// engine-only summary, built only from values already present in engineContext.\n\nconst httpResponse = $input.first().json;\nconst engineContext = ($node[\"Build Recommendation Prompt\"] && $node[\"Build Recommendation Prompt\"].json) || {};\nconst { data, validation, reconciliationResults, fin, scenarioBundle, classifications, dataConfidence } = engineContext;\n\nfunction extractText(httpResponse) {\n  try {\n    const content = httpResponse?.content || httpResponse?.body?.content;\n    if (!Array.isArray(content)) return null;\n    const textBlock = content.find((b) => b.type === 'text');\n    return textBlock ? textBlock.text : null;\n  } catch (e) {\n    return null;\n  }\n}\n\nfunction safeParseJSON(text) {\n  if (!text) return null;\n  const cleaned = text.replace(/```json/gi, '').replace(/```/g, '').trim();\n  try { return JSON.parse(cleaned); } catch (e) { return null; }\n}\n\nfunction collectEngineNumbers(fin, scenarioBundle) {\n  const nums = [];\n  const push = (v) => { if (typeof v === 'number' && Number.isFinite(v)) nums.push(Math.round(v)); };\n  Object.values(fin || {}).forEach((v) => push(v));\n  if (fin?.comfortableEMIRange) { push(fin.comfortableEMIRange.lower); push(fin.comfortableEMIRange.upper); }\n  const walk = (obj) => {\n    if (!obj || typeof obj !== 'object') return;\n    Object.values(obj).forEach((v) => { if (typeof v === 'number') push(v); else if (typeof v === 'object') walk(v); });\n  };\n  walk(scenarioBundle?.scenarios);\n  return nums;\n}\nfunction extractNumbersFromText(text) {\n  const matches = text.match(/-?\\d{3,}(\\.\\d+)?/g) || [];\n  return matches.map((m) => Math.round(Number(m))).filter((n) => Number.isFinite(n));\n}\n\nfunction validateRecommendationOutput(aiJson, fin, scenarioBundle) {\n  const errors = [];\n  if (!aiJson || typeof aiJson !== 'object') return { valid: false, errors: ['AI output is not valid JSON.'] };\n  if (!aiJson.primaryRecommendation) errors.push('Missing primaryRecommendation.');\n  if (!Array.isArray(aiJson.alternativeOptions)) errors.push('Missing alternativeOptions array.');\n  if (!Array.isArray(aiJson.notPreferredOptions)) errors.push('Missing notPreferredOptions array.');\n  if (!aiJson.disclaimer || typeof aiJson.disclaimer !== 'string' || aiJson.disclaimer.length < 10) errors.push('Missing or insufficient disclaimer.');\n\n  const bannedPhrases = ['guarantee', 'guaranteed', 'will be approved', 'assured approval', 'promise'];\n  const allText = JSON.stringify(aiJson).toLowerCase();\n  bannedPhrases.forEach((p) => { if (allText.includes(p)) errors.push(`AI output contains a disallowed guarantee-style phrase: \"${p}\".`); });\n\n  const engineNumbers = collectEngineNumbers(fin, scenarioBundle);\n  const citedNumbers = extractNumbersFromText(JSON.stringify(aiJson));\n  const unverifiable = citedNumbers.filter((n) => !engineNumbers.some((e) => Math.abs(e - n) < Math.max(1, e * 0.01)));\n  const materialUnverifiable = unverifiable.filter((n) => n > 100);\n  if (materialUnverifiable.length > 0) errors.push(`AI output cites figures not found in engine output: ${materialUnverifiable.slice(0, 5).join(', ')}`);\n\n  // If the engine context itself failed to load, we cannot trust any AI output that claims to be based on it.\n  if (!fin) errors.push('Deterministic engine context unavailable — cannot verify AI output.');\n\n  return { valid: errors.length === 0, errors };\n}\n\nfunction buildFailClosedRecommendation(classifications, fin) {\n  // A deterministic, engine-only fallback used ONLY if the AI output cannot be trusted\n  // (or the engine context itself could not be retrieved). Every field below uses\n  // optional chaining so this function itself can never throw.\n  const safeClassifications = Array.isArray(classifications) ? classifications : [];\n  const isHealthy = safeClassifications.length === 1 && safeClassifications[0] === 'HEALTHY';\n  return {\n    aiUnavailable: true,\n    summaryForOwner: isHealthy\n      ? 'Based on the numbers provided, your current loan payments appear manageable.'\n      : 'We were not able to generate a fully verified explanation this time, but here is what the numbers show.',\n    primaryRecommendation: isHealthy\n      ? { title: 'Continue monitoring', explanation: 'No restructuring is indicated by the current numbers. Keep an eye on your cash cushion and upcoming EMIs.', supportingNumbers: [] }\n      : { title: 'Review the figures below with a financial advisor or your lender', explanation: 'An automated explanation could not be safely verified. The underlying calculations (available below) are accurate and can be used as-is for a discussion with your lender or a Chartered Accountant.', supportingNumbers: [] },\n    alternativeOptions: [],\n    notPreferredOptions: [],\n    risksAndTradeoffs: ['This is a fallback summary. Please review the detailed financial view before making decisions.'],\n    technicalDetails: { internalDSCR: fin?.internalDSCR ?? null, emiToAvailableRatio: fin?.emiToAvailableRatio ?? null, note: 'Fallback path — AI explanation failed validation or the deterministic engine context was unavailable.' },\n    disclaimer: 'This is an estimate based on the information provided. It is not a loan approval, lender decision, or financial guarantee of any kind.',\n  };\n}\n\nconst text = extractText(httpResponse);\nconst parsed = safeParseJSON(text);\nconst validation2 = validateRecommendationOutput(parsed, fin, scenarioBundle);\n\nconst recommendation = validation2.valid ? parsed : buildFailClosedRecommendation(classifications, fin);\n\nreturn [{\n  json: {\n    data,\n    validation,\n    reconciliationResults,\n    fin,\n    scenarioBundle,\n    classifications,\n    dataConfidence,\n    recommendation,\n    recommendationValidation: validation2,\n  },\n}];\n"
+      },
+      "id": "m21",
+      "name": "Validate & Parse Recommendation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { recommendation: $json.recommendation, validation: $json.recommendationValidation } }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "m23",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1040,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Build Recommendation Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Recommendation Prompt": {
+      "main": [
+        [
+          {
+            "node": "AI Recommendation (Anthropic)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Recommendation (Anthropic)": {
+      "main": [
+        [
+          {
+            "node": "Validate & Parse Recommendation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Parse Recommendation": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "restructra-demo"
+  }
+}

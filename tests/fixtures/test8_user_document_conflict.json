@@ -1,0 +1,70 @@
+{
+  "_label": "FICTIONAL TEST DATA \u2014 NOT A REAL FINANCIAL RECORD",
+  "businessName": "Shree Balaji Engineering Works",
+  "business": {
+    "type": "Manufacturing",
+    "monthlySales": 2000000,
+    "monthlyExpenses": 1680000,
+    "customersPayingLate": "Yes",
+    "receivablesAmount": 950000,
+    "incomeOutlook": "Stay similar",
+    "cashReserve": 350000
+  },
+  "loans": [
+    {
+      "id": "loan_1",
+      "lender": "HDFC Bank",
+      "loanType": "Business loan",
+      "outstandingAmount": 2800000,
+      "emi": 78500,
+      "remainingTenure": 36,
+      "remainingTenureUnit": "months",
+      "interestRatePct": 13.5,
+      "secured": "Yes"
+    },
+    {
+      "id": "loan_2",
+      "lender": "Bajaj Finserv",
+      "loanType": "Machinery/equipment loan",
+      "outstandingAmount": 1200000,
+      "emi": 42000,
+      "remainingTenure": 30,
+      "remainingTenureUnit": "months",
+      "interestRatePct": 15.0,
+      "secured": "Yes"
+    },
+    {
+      "id": "loan_3",
+      "lender": "ICICI Bank",
+      "loanType": "Cash credit/overdraft",
+      "outstandingAmount": 600000,
+      "emi": 18000,
+      "remainingTenure": 24,
+      "remainingTenureUnit": "months",
+      "interestRatePct": 14.0,
+      "secured": "No"
+    }
+  ],
+  "mainProblem": "Customers haven't paid me yet",
+  "urgency": "In the next 1-3 months",
+  "documents": [
+    {
+      "documentType": "loan_statement",
+      "fileName": "loan1_statement.txt",
+      "fields": [
+        {
+          "field": "monthlyEMI",
+          "value": 145000,
+          "source": "loan_statement",
+          "confidence": "HIGH"
+        },
+        {
+          "field": "totalOutstanding",
+          "value": 4700000,
+          "source": "loan_statement",
+          "confidence": "HIGH"
+        }
+      ]
+    }
+  ]
+}

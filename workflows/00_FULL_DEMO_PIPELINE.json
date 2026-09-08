@@ -1,0 +1,403 @@
+{
+  "name": "00_FULL_DEMO_PIPELINE — RESTRUCTRA",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "restructra/full-pipeline",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "n1",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "restructra-full-pipeline"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// n8n Code node — \"01-03: Intake, Documents, Reconciliation\"\n// Mode: Run Once for All Items. Expects the webhook body at items[0].json.body\n// (Mode A: direct JSON; Mode B: same shape produced by the questionnaire frontend).\n//\n// NOTE ON DOCUMENT PROCESSING (see README \"Known Limitations\"):\n// RESTRUCTRA does not ship its own OCR/PDF-parsing model. Each item in\n// `documents[]` is expected to already carry a `fields[]` array — the output\n// of an extraction step (an OCR + LLM extraction call, or a human-reviewed\n// upload). This keeps the deterministic engine identical whether the fields\n// came from a real extraction pipeline or from the bundled sample documents.\n// A placeholder HTTP Request node (\"Document Extraction (OCR/LLM)\") is\n// provided upstream of this node in the modular version for teams who want\n// to wire in a real extraction service (Textract, Azure Doc Intelligence,\n// an LLM vision call, etc.) — see docs/ARCHITECTURE.md §Document Processing.\n\nconst raw = $input.first().json.body || $input.first().json;\n\n// ---------- normalize ----------\nfunction toNumberOrNull(v) {\n  if (v === null || v === undefined || v === '' || v === \"I don't know\" || v === 'Not sure') return null;\n  const n = typeof v === 'number' ? v : Number(String(v).replace(/[₹,\\s]/g, ''));\n  return Number.isFinite(n) ? n : null;\n}\nfunction normalizeTenure(value, unit) {\n  const n = toNumberOrNull(value);\n  if (n === null) return null;\n  if (unit === 'years') return Math.round(n * 12);\n  return Math.round(n);\n}\nfunction normalizeInput(r) {\n  return {\n    business: {\n      type: r?.business?.type ?? null,\n      monthlySales: toNumberOrNull(r?.business?.monthlySales),\n      monthlyExpenses: toNumberOrNull(r?.business?.monthlyExpenses),\n      customersPayingLate: r?.business?.customersPayingLate ?? 'Not sure',\n      receivablesAmount: toNumberOrNull(r?.business?.receivablesAmount),\n      incomeOutlook: r?.business?.incomeOutlook ?? 'Not sure',\n      cashReserve: toNumberOrNull(r?.business?.cashReserve),\n    },\n    loans: Array.isArray(r?.loans)\n      ? r.loans.map((l, i) => ({\n          id: l.id || `loan_${i + 1}`,\n          lender: l.lender ?? null,\n          loanType: l.loanType ?? \"Don't know\",\n          outstandingAmount: toNumberOrNull(l.outstandingAmount),\n          emi: toNumberOrNull(l.emi),\n          remainingTenureMonths: normalizeTenure(l.remainingTenure, l.remainingTenureUnit),\n          interestRatePct: toNumberOrNull(l.interestRatePct),\n          secured: l.secured ?? null,\n        }))\n      : [],\n    mainProblem: r?.mainProblem ?? \"I'm not sure\",\n    urgency: r?.urgency ?? \"I'm not sure\",\n    documents: Array.isArray(r?.documents) ? r.documents : [],\n    businessName: r?.businessName ?? null,\n  };\n}\n\n// ---------- validate ----------\nfunction validateInput(data) {\n  const errors = [];\n  const warnings = [];\n  if (data.business.monthlySales === null) warnings.push({ field: 'monthlySales', message: 'Monthly sales not provided.' });\n  if (data.business.monthlyExpenses === null) warnings.push({ field: 'monthlyExpenses', message: 'Monthly expenses not provided.' });\n  if (data.business.monthlySales !== null && data.business.monthlySales < 0) errors.push({ field: 'monthlySales', message: 'Monthly sales cannot be negative.' });\n  if (data.business.monthlyExpenses !== null && data.business.monthlyExpenses < 0) errors.push({ field: 'monthlyExpenses', message: 'Monthly expenses cannot be negative.' });\n  if (!Array.isArray(data.loans) || data.loans.length === 0) {\n    warnings.push({ field: 'loans', message: 'No loans provided.' });\n  } else {\n    data.loans.forEach((l) => {\n      if (l.emi === null) warnings.push({ field: `${l.id}.emi`, message: `EMI missing for loan ${l.id}.` });\n      if (l.outstandingAmount === null) warnings.push({ field: `${l.id}.outstandingAmount`, message: `Outstanding amount missing for loan ${l.id}.` });\n      if (l.emi !== null && l.emi < 0) errors.push({ field: `${l.id}.emi`, message: 'EMI cannot be negative.' });\n      if (l.outstandingAmount !== null && l.outstandingAmount < 0) errors.push({ field: `${l.id}.outstandingAmount`, message: 'Outstanding amount cannot be negative.' });\n      if (l.interestRatePct !== null && (l.interestRatePct < 0 || l.interestRatePct > 60)) errors.push({ field: `${l.id}.interestRatePct`, message: 'Interest rate looks invalid.' });\n    });\n  }\n  return { isValid: errors.length === 0, errors, warnings };\n}\n\n// ---------- reconciliation ----------\nfunction sumEMI(loans) {\n  const known = (loans || []).filter((l) => l.emi !== null);\n  if (known.length === 0) return null;\n  return known.reduce((s, l) => s + l.emi, 0);\n}\nfunction sumOutstanding(loans) {\n  const known = (loans || []).filter((l) => l.outstandingAmount !== null);\n  if (known.length === 0) return null;\n  return known.reduce((s, l) => s + l.outstandingAmount, 0);\n}\nfunction reconcile(userData, extractedDoc) {\n  const conflicts = [];\n  const confirmations = [];\n  if (!extractedDoc || extractedDoc.extractionFailed || !Array.isArray(extractedDoc.fields) || extractedDoc.fields.length === 0) {\n    return {\n      documentType: extractedDoc?.documentType || 'unknown',\n      fileName: extractedDoc?.fileName || null,\n      conflicts,\n      confirmations,\n      hasConflicts: false,\n      extractionFailed: !!extractedDoc?.extractionFailed || (extractedDoc && extractedDoc.fields && extractedDoc.fields.length === 0),\n    };\n  }\n  const TOLERANCE = 0.03;\n  const userLookup = {\n    monthlyEMI: sumEMI(userData.loans),\n    totalOutstanding: sumOutstanding(userData.loans),\n    monthlySales: userData.business.monthlySales,\n  };\n  extractedDoc.fields.forEach((f) => {\n    if (!(f.field in userLookup)) return;\n    const userValue = userLookup[f.field];\n    const docValue = toNumberOrNull(f.value);\n    if (userValue === null || docValue === null) return;\n    const diffRatio = userValue === 0 ? (docValue === 0 ? 0 : 1) : Math.abs(userValue - docValue) / Math.abs(userValue);\n    const record = {\n      field: f.field,\n      userValue,\n      documentValue: docValue,\n      source: f.source,\n      confidence: f.confidence,\n      diffPct: Math.round(diffRatio * 1000) / 10,\n    };\n    if (diffRatio > TOLERANCE) conflicts.push({ ...record, status: 'CONFLICT', actionRequired: true });\n    else confirmations.push({ ...record, status: 'CONFIRMED', actionRequired: false });\n  });\n  return {\n    documentType: extractedDoc.documentType || 'unknown',\n    fileName: extractedDoc.fileName || null,\n    conflicts,\n    confirmations,\n    hasConflicts: conflicts.length > 0,\n    extractionFailed: false,\n  };\n}\n\n// ---------- run ----------\nconst data = normalizeInput(raw);\nconst validation = validateInput(data);\nconst reconciliationResults = (data.documents || []).map((doc) => reconcile(data, doc));\nconst anyExtractionFailed = reconciliationResults.some((r) => r.extractionFailed);\nconst anyConflicts = reconciliationResults.some((r) => r.hasConflicts);\n\nreturn [\n  {\n    json: {\n      data,\n      validation,\n      reconciliationResults,\n      anyExtractionFailed,\n      anyConflicts,\n    },\n  },\n];\n"
+      },
+      "id": "n2",
+      "name": "01-03 Intake, Documents, Reconciliation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond1",
+              "leftValue": "={{ $json.validation.isValid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "n3",
+      "name": "Input Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        520,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { status: 'error', userMessage: \"We couldn't understand some of the numbers you entered. Please check them and try again.\", validationErrors: $json.validation.errors } }}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "id": "n4",
+      "name": "Respond - Validation Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        780,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// n8n Code node — \"04-06: Financial Engine, Scenario Engine, Stress Diagnosis\"\n// All figures here are DETERMINISTIC. The LLM downstream is only allowed to\n// explain these numbers in simple language — never to invent or recompute them.\n\nconst input = $input.first().json;\nconst data = input.data;\nconst validation = input.validation;\nconst reconciliationResults = input.reconciliationResults;\n\nfunction round2(n) { return n === null || n === undefined ? null : Math.round(n * 100) / 100; }\nfunction sumEMI(loans) {\n  const known = (loans || []).filter((l) => l.emi !== null);\n  if (known.length === 0) return null;\n  return known.reduce((s, l) => s + l.emi, 0);\n}\nfunction sumOutstanding(loans) {\n  const known = (loans || []).filter((l) => l.outstandingAmount !== null);\n  if (known.length === 0) return null;\n  return known.reduce((s, l) => s + l.outstandingAmount, 0);\n}\n\nfunction computeFinancials(data) {\n  const sales = data.business.monthlySales;\n  const expenses = data.business.monthlyExpenses;\n  const loans = data.loans || [];\n  const totalMonthlyEMI = sumEMI(loans);\n  const totalOutstandingDebt = sumOutstanding(loans);\n  const missingEMICount = loans.filter((l) => l.emi === null).length;\n  const availableAfterExpenses = sales !== null && expenses !== null ? round2(sales - expenses) : null;\n  const availableAfterEMI = availableAfterExpenses !== null && totalMonthlyEMI !== null ? round2(availableAfterExpenses - totalMonthlyEMI) : null;\n  const internalDSCR = availableAfterExpenses !== null && totalMonthlyEMI ? round2(availableAfterExpenses / totalMonthlyEMI) : null;\n  const emiToSalesRatio = sales && totalMonthlyEMI !== null ? round2(totalMonthlyEMI / sales) : null;\n  const emiToAvailableRatio = availableAfterExpenses !== null && availableAfterExpenses > 0 && totalMonthlyEMI !== null ? round2(totalMonthlyEMI / availableAfterExpenses) : null;\n  const cashReserve = data.business.cashReserve;\n  const cashBufferMonths = cashReserve !== null && totalMonthlyEMI ? round2(cashReserve / totalMonthlyEMI) : null;\n  const receivables = data.business.receivablesAmount;\n  const receivablesRatio = receivables !== null && sales ? round2(receivables / sales) : null;\n\n  let debtConcentration = 'UNKNOWN';\n  const knownOutstanding = loans.filter((l) => l.outstandingAmount !== null);\n  if (loans.length === 1) debtConcentration = 'SINGLE_LOAN';\n  else if (knownOutstanding.length >= 2 && totalOutstandingDebt) {\n    const maxShare = Math.max(...knownOutstanding.map((l) => l.outstandingAmount)) / totalOutstandingDebt;\n    debtConcentration = maxShare > 0.6 ? 'CONCENTRATED' : 'DISTRIBUTED';\n  }\n\n  const rated = loans.filter((l) => l.interestRatePct !== null && l.outstandingAmount !== null);\n  let weightedAvgInterestRate = null, interestRateAssumed = false;\n  if (rated.length > 0) {\n    const sumOut = rated.reduce((s, l) => s + l.outstandingAmount, 0);\n    weightedAvgInterestRate = round2(rated.reduce((s, l) => s + l.outstandingAmount * l.interestRatePct, 0) / sumOut);\n  } else { weightedAvgInterestRate = 14.0; interestRateAssumed = true; }\n\n  const tenured = loans.filter((l) => l.remainingTenureMonths !== null && l.outstandingAmount !== null);\n  let weightedAvgTenureMonths = null, tenureAssumed = false;\n  if (tenured.length > 0) {\n    const sumOut = tenured.reduce((s, l) => s + l.outstandingAmount, 0);\n    weightedAvgTenureMonths = Math.round(tenured.reduce((s, l) => s + l.outstandingAmount * l.remainingTenureMonths, 0) / sumOut);\n  } else { weightedAvgTenureMonths = 36; tenureAssumed = true; }\n\n  let comfortableEMIRange = null;\n  if (availableAfterExpenses !== null && availableAfterExpenses > 0) {\n    comfortableEMIRange = {\n      lower: round2(availableAfterExpenses * 0.4),\n      upper: round2(availableAfterExpenses * 0.55),\n      basis: 'Illustrative safety-cushion calculation: 40%-55% of estimated money left after business expenses. Not a lender-approved affordability limit.',\n    };\n  }\n\n  return { totalMonthlyEMI, totalOutstandingDebt, missingEMICount, availableAfterExpenses, availableAfterEMI, internalDSCR, emiToSalesRatio, emiToAvailableRatio, cashBufferMonths, receivablesRatio, debtConcentration, weightedAvgInterestRate, interestRateAssumed, weightedAvgTenureMonths, tenureAssumed, comfortableEMIRange };\n}\n\nfunction emiForLoan(principal, annualRatePct, tenureMonths) {\n  if (!principal || !tenureMonths) return null;\n  const r = annualRatePct / 12 / 100;\n  if (r === 0) return round2(principal / tenureMonths);\n  const factor = Math.pow(1 + r, tenureMonths);\n  return round2((principal * r * factor) / (factor - 1));\n}\nfunction totalRepayment(emi, months) { if (emi === null || !months) return null; return round2(emi * months); }\n\nconst STRESS_ASSUMPTIONS = { stressRevenueChangePct: -20, recoveryRevenueChangePct: 15, expensesHeldConstant: true };\nfunction availableUnderRevenueChange(sales, expenses, changePct) {\n  if (sales === null || expenses === null) return null;\n  return round2(sales * (1 + changePct / 100) - expenses);\n}\n\nfunction buildScenarios(data, fin) {\n  const sales = data.business.monthlySales, expenses = data.business.monthlyExpenses;\n  const outstanding = fin.totalOutstandingDebt, rate = fin.weightedAvgInterestRate, tenure = fin.weightedAvgTenureMonths, currentEMI = fin.totalMonthlyEMI;\n  const availBase = fin.availableAfterExpenses;\n  const availStress = availableUnderRevenueChange(sales, expenses, STRESS_ASSUMPTIONS.stressRevenueChangePct);\n  const availRecovery = availableUnderRevenueChange(sales, expenses, STRESS_ASSUMPTIONS.recoveryRevenueChangePct);\n  function testCase(emi) {\n    if (emi === null) return null;\n    return { base: availBase !== null ? round2(availBase - emi) : null, stress: availStress !== null ? round2(availStress - emi) : null, recovery: availRecovery !== null ? round2(availRecovery - emi) : null };\n  }\n\n  const scenarios = {};\n  scenarios.current = { label: 'Current repayment (no change)', emi: currentEMI, tenureMonths: tenure, estimatedRemainingRepayment: totalRepayment(currentEMI, tenure), monthlySurplusDeficit: testCase(currentEMI), note: 'Reflects the loan terms as currently reported.' };\n\n  if (outstanding && tenure && rate !== null) {\n    scenarios.longerRepayment = {};\n    [0.25, 0.5, 1.0].forEach((extPct) => {\n      const key = `extend_${Math.round(extPct * 100)}pct`;\n      const newTenure = Math.round(tenure * (1 + extPct));\n      const newEMI = emiForLoan(outstanding, rate, newTenure);\n      scenarios.longerRepayment[key] = {\n        label: `Extend remaining tenure by ${Math.round(extPct * 100)}%`,\n        newTenureMonths: newTenure, newEMI,\n        emiReduction: currentEMI !== null && newEMI !== null ? round2(currentEMI - newEMI) : null,\n        estimatedAdditionalInterest: totalRepayment(newEMI, newTenure) !== null && totalRepayment(currentEMI, tenure) !== null ? round2(totalRepayment(newEMI, newTenure) - totalRepayment(currentEMI, tenure)) : null,\n        monthlySurplusDeficit: testCase(newEMI),\n        disclaimer: 'Illustrative scenario only. Actual terms depend on lender approval.',\n      };\n    });\n    scenarios.longerRepayment.default = 'extend_50pct';\n  } else scenarios.longerRepayment = { unavailable: true, reason: 'Insufficient data (outstanding amount, tenure, or interest rate missing).' };\n\n  if (outstanding && tenure && rate !== null) {\n    const reliefMonths = 3, monthlyRate = rate / 12 / 100;\n    const accruedInterest = round2(outstanding * monthlyRate * reliefMonths);\n    const newPrincipal = round2(outstanding + accruedInterest);\n    const postReliefEMI = emiForLoan(newPrincipal, rate, tenure);\n    scenarios.temporaryRelief = {\n      label: `${reliefMonths}-month illustrative payment relief`, reliefMonths, paymentDuringRelief: 0,\n      assumedInterestTreatment: 'Interest continues to accrue during relief and is added to outstanding principal.',\n      accruedInterestDuringRelief: accruedInterest, postReliefEMI, postReliefTenureMonths: tenure,\n      totalTimelineMonths: tenure + reliefMonths,\n      monthlySurplusDeficitDuringRelief: testCase(0),\n      monthlySurplusDeficitAfterRelief: testCase(postReliefEMI),\n      disclaimer: 'Illustrative scenario only. The lender may or may not offer this exact structure.',\n    };\n  } else scenarios.temporaryRelief = { unavailable: true, reason: 'Insufficient data (outstanding amount, tenure, or interest rate missing).' };\n\n  if (outstanding && tenure && rate !== null && currentEMI !== null) {\n    const stepMonths = 6, reducedEMI = round2(currentEMI * 0.6);\n    const principalPaidInStep = round2(reducedEMI * stepMonths);\n    const monthlyRate = rate / 12 / 100;\n    const interestDuringStep = round2(outstanding * monthlyRate * stepMonths);\n    const remainingPrincipalAfterStep = round2(Math.max(outstanding + interestDuringStep - principalPaidInStep, 0));\n    const remainingTenureAfterStep = Math.max(tenure - stepMonths, 1);\n    const subsequentEMI = emiForLoan(remainingPrincipalAfterStep, rate, remainingTenureAfterStep);\n    scenarios.stepDown = {\n      label: `Reduced EMI for ${stepMonths} months, then step up`, stepMonths, reducedEMI, subsequentEMI,\n      subsequentTenureMonths: remainingTenureAfterStep, totalTimelineMonths: stepMonths + remainingTenureAfterStep,\n      monthlySurplusDeficitDuringStep: testCase(reducedEMI), monthlySurplusDeficitAfterStep: testCase(subsequentEMI),\n      simplification: 'Principal/interest split during the step-down period is approximated, not a full amortization schedule.',\n      disclaimer: 'Illustrative scenario only. Actual terms depend on lender approval.',\n    };\n  } else scenarios.stepDown = { unavailable: true, reason: 'Insufficient data.' };\n\n  const loans = data.loans || [];\n  if (loans.length >= 2) {\n    const allHaveData = loans.every((l) => l.outstandingAmount !== null && l.interestRatePct !== null && l.remainingTenureMonths !== null);\n    if (allHaveData) {\n      const consolidatedTenure = Math.max(...loans.map((l) => l.remainingTenureMonths));\n      const consolidatedEMI = emiForLoan(outstanding, rate, consolidatedTenure);\n      const emiReductionPct = currentEMI ? round2(((currentEMI - consolidatedEMI) / currentEMI) * 100) : null;\n      const meaningfullyBeneficial = emiReductionPct !== null && emiReductionPct >= 15;\n      scenarios.consolidation = {\n        label: 'Consolidate all loans into a single facility', consolidatedOutstanding: outstanding, consolidatedEMI,\n        consolidatedTenureMonths: consolidatedTenure, emiReduction: currentEMI !== null ? round2(currentEMI - consolidatedEMI) : null,\n        emiReductionPct, recommended: meaningfullyBeneficial, monthlySurplusDeficit: testCase(consolidatedEMI),\n        note: meaningfullyBeneficial ? 'Calculated reduction is meaningful (>=15%). Presented as an option, not an automatic recommendation.' : 'Calculated benefit is not large enough to recommend consolidation on its own.',\n        disclaimer: 'Illustrative scenario only. Actual consolidated terms depend on lender approval.',\n      };\n    } else scenarios.consolidation = { unavailable: true, reason: 'Consolidation cannot be reliably assessed from the available information (missing rate/tenure/outstanding on at least one loan).' };\n  } else scenarios.consolidation = { notApplicable: true, reason: 'Only one loan reported.' };\n\n  return { scenarios, stressAssumptions: STRESS_ASSUMPTIONS };\n}\n\nfunction diagnoseStress(data, fin, scenarioBundle) {\n  const classifications = new Set();\n  const { internalDSCR, cashBufferMonths, receivablesRatio, emiToAvailableRatio, weightedAvgInterestRate, interestRateAssumed } = fin;\n  const loans = data.loans || [];\n  const dscrKnown = internalDSCR !== null, bufferKnown = cashBufferMonths !== null;\n\n  if (dscrKnown && internalDSCR >= 1.6 && (!bufferKnown || cashBufferMonths >= 2) && (receivablesRatio === null || receivablesRatio < 0.3)) classifications.add('HEALTHY');\n  else if (dscrKnown && internalDSCR >= 1.15) classifications.add('WATCH');\n\n  if (emiToAvailableRatio !== null && emiToAvailableRatio > 0.6) classifications.add('HIGH_EMI_BURDEN');\n  if (receivablesRatio !== null && receivablesRatio > 0.35 && ['Yes', 'Sometimes'].includes(data.business.customersPayingLate)) classifications.add('TEMPORARY_LIQUIDITY_STRESS');\n  if (data.mainProblem === 'My business is seasonal') classifications.add('SEASONAL_CASH_FLOW_STRESS');\n  if (!interestRateAssumed && weightedAvgInterestRate !== null && weightedAvgInterestRate > 16) classifications.add('HIGH_INTEREST_BURDEN');\n  if (loans.length >= 3) classifications.add('MULTIPLE_LOAN_COMPLEXITY');\n  if (dscrKnown && internalDSCR < 1.0 && classifications.size === 0) classifications.add('WATCH');\n\n  if (scenarioBundle && scenarioBundle.scenarios) {\n    const s = scenarioBundle.scenarios;\n    const candidateBaseValues = [];\n    if (s.current?.monthlySurplusDeficit?.base !== undefined) candidateBaseValues.push(s.current.monthlySurplusDeficit.base);\n    if (s.longerRepayment && !s.longerRepayment.unavailable) Object.values(s.longerRepayment).forEach((v) => { if (v && typeof v === 'object' && v.monthlySurplusDeficit) candidateBaseValues.push(v.monthlySurplusDeficit.base); });\n    if (s.temporaryRelief && !s.temporaryRelief.unavailable) candidateBaseValues.push(s.temporaryRelief.monthlySurplusDeficitAfterRelief?.base);\n    if (s.stepDown && !s.stepDown.unavailable) candidateBaseValues.push(s.stepDown.monthlySurplusDeficitAfterStep?.base);\n    if (s.consolidation && !s.consolidation.unavailable && !s.consolidation.notApplicable) candidateBaseValues.push(s.consolidation.monthlySurplusDeficit?.base);\n    const validCandidates = candidateBaseValues.filter((v) => v !== null && v !== undefined);\n    if (validCandidates.length > 0 && Math.max(...validCandidates) < 0) classifications.add('STRUCTURAL_CASH_FLOW_PROBLEM');\n  }\n\n  if (classifications.size === 0) classifications.add('WATCH');\n  return Array.from(classifications);\n}\n\nfunction computeDataConfidence(data, validation, reconciliationResults, fin) {\n  let score = 100;\n  score -= validation.warnings.length * 8;\n  const conflictCount = (reconciliationResults || []).reduce((s, r) => s + (r.conflicts ? r.conflicts.length : 0), 0);\n  score -= conflictCount * 15;\n  if (data.documents.length === 0) score -= 10;\n  if (fin.tenureAssumed) score -= 12;\n  if (fin.interestRateAssumed) score -= 12;\n  if (fin.missingEMICount > 0) score -= fin.missingEMICount * 10;\n  score = Math.max(0, Math.min(100, score));\n  let level = 'HIGH';\n  if (score < 50) level = 'LOW'; else if (score < 80) level = 'MEDIUM';\n  return { score, level };\n}\n\nconst fin = computeFinancials(data);\nconst scenarioBundle = buildScenarios(data, fin);\nconst classifications = diagnoseStress(data, fin, scenarioBundle);\nconst dataConfidence = computeDataConfidence(data, validation, reconciliationResults, fin);\n\nreturn [{ json: { data, validation, reconciliationResults, fin, scenarioBundle, classifications, dataConfidence } }];\n"
+      },
+      "id": "n5",
+      "name": "04-06 Financial Engine, Scenarios, Diagnosis",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// n8n Code node — \"Build Recommendation Prompt\"\n// Produces the exact system+user prompt sent to the LLM. The LLM is never\n// given raw permission to invent numbers — every figure it may reference is\n// pre-computed and handed to it as the \"ENGINE_OUTPUT\" JSON block.\n\nconst input = $input.first().json;\nconst { data, fin, scenarioBundle, classifications, dataConfidence, reconciliationResults } = input;\n\nconst systemPrompt = `You are the explanation layer of RESTRUCTRA, a financial decision-support tool for Indian MSME owners.\nYou are NOT a lender, NOT a CA, and NOT authorized to guarantee any outcome.\n\nSTRICT RULES:\n1. You may only use numbers that appear in the ENGINE_OUTPUT JSON given to you. Never invent, round differently, or recalculate a figure.\n2. You must return EXACTLY ONE \"primaryRecommendation\" plus arrays \"alternativeOptions\" and \"notPreferredOptions\".\n3. Never use the words \"guarantee\", \"guaranteed\", \"assured\", \"promise\", or claim the lender \"will\" approve anything.\n4. Every scenario you mention must be labelled as illustrative/an estimate, not a lender-confirmed offer.\n5. If STRUCTURAL_CASH_FLOW_PROBLEM is present in classifications, you must state clearly that restructuring alone may not solve the underlying issue, and suggest the owner also look at the operating business problem.\n6. If classifications is exactly [\"HEALTHY\"], your primaryRecommendation must be to continue monitoring — do not recommend restructuring.\n7. Write in simple, plain language a non-finance small-business owner can understand. Avoid jargon (no \"DSCR\", \"amortization\", etc. in the primary explanation — those may appear only inside a \"technicalDetails\" field).\n8. Return ONLY valid JSON matching the schema below. No markdown, no commentary, no code fences.\n\nOUTPUT SCHEMA:\n{\n  \"summaryForOwner\": \"string, 2-4 plain sentences\",\n  \"primaryRecommendation\": { \"title\": \"string\", \"explanation\": \"string\", \"supportingNumbers\": [\"string referencing ENGINE_OUTPUT values only\"] },\n  \"alternativeOptions\": [ { \"title\": \"string\", \"explanation\": \"string\" } ],\n  \"notPreferredOptions\": [ { \"title\": \"string\", \"reasonNotPreferred\": \"string\" } ],\n  \"risksAndTradeoffs\": [\"string\"],\n  \"technicalDetails\": { \"internalDSCR\": number|null, \"emiToAvailableRatio\": number|null, \"note\": \"string\" },\n  \"disclaimer\": \"string — must state this is an estimate, not a lender decision, approval, or guarantee\"\n}`;\n\nconst userPrompt = `ENGINE_OUTPUT (the only source of numbers you may use):\n${JSON.stringify({ business: data.business, loans: data.loans, mainProblem: data.mainProblem, urgency: data.urgency, fin, scenarios: scenarioBundle.scenarios, stressAssumptions: scenarioBundle.stressAssumptions, classifications, dataConfidence, reconciliationConflicts: reconciliationResults.flatMap(r => r.conflicts) }, null, 2)}\n\nUsing ONLY the numbers above, write the recommendation JSON described in the system prompt.`;\n\nreturn [{\n  json: {\n    ...input,\n    aiRequest: {\n      model: 'claude-sonnet-4-6',\n      max_tokens: 1500,\n      system: systemPrompt,\n      messages: [{ role: 'user', content: userPrompt }],\n    },\n  },\n}];\n"
+      },
+      "id": "n6",
+      "name": "Build Recommendation Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.aiRequest) }}",
+        "options": {}
+      },
+      "id": "n7",
+      "name": "AI Recommendation (Anthropic)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1300,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Anthropic API Key (x-api-key header)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// n8n Code node — \"Validate & Parse Recommendation (fail-closed)\"\n//\n// DATA-FLOW NOTE (fix): after the \"AI Recommendation\" HTTP Request node runs,\n// $input.first().json is the Anthropic HTTP response — NOT the deterministic\n// engine output. The engine output must be fetched explicitly from the node\n// that produced it, by name, via $node[...]. The placeholder\n// 04-06 Financial Engine, Scenarios, Diagnosis below is substituted at build time\n// (see workflows/build_workflow.js / build_modules.js) with the exact name\n// of the upstream node that carries {data, fin, scenarioBundle,\n// classifications, dataConfidence, reconciliationResults} for whichever\n// workflow this file is assembled into.\n//\n// If ANY validation check fails, we do NOT fabricate a fallback\n// recommendation with invented numbers — we fail closed to a deterministic,\n// engine-only summary, built only from values already present in engineContext.\n\nconst httpResponse = $input.first().json;\nconst engineContext = ($node[\"04-06 Financial Engine, Scenarios, Diagnosis\"] && $node[\"04-06 Financial Engine, Scenarios, Diagnosis\"].json) || {};\nconst { data, validation, reconciliationResults, fin, scenarioBundle, classifications, dataConfidence } = engineContext;\n\nfunction extractText(httpResponse) {\n  try {\n    const content = httpResponse?.content || httpResponse?.body?.content;\n    if (!Array.isArray(content)) return null;\n    const textBlock = content.find((b) => b.type === 'text');\n    return textBlock ? textBlock.text : null;\n  } catch (e) {\n    return null;\n  }\n}\n\nfunction safeParseJSON(text) {\n  if (!text) return null;\n  const cleaned = text.replace(/```json/gi, '').replace(/```/g, '').trim();\n  try { return JSON.parse(cleaned); } catch (e) { return null; }\n}\n\nfunction collectEngineNumbers(fin, scenarioBundle) {\n  const nums = [];\n  const push = (v) => { if (typeof v === 'number' && Number.isFinite(v)) nums.push(Math.round(v)); };\n  Object.values(fin || {}).forEach((v) => push(v));\n  if (fin?.comfortableEMIRange) { push(fin.comfortableEMIRange.lower); push(fin.comfortableEMIRange.upper); }\n  const walk = (obj) => {\n    if (!obj || typeof obj !== 'object') return;\n    Object.values(obj).forEach((v) => { if (typeof v === 'number') push(v); else if (typeof v === 'object') walk(v); });\n  };\n  walk(scenarioBundle?.scenarios);\n  return nums;\n}\nfunction extractNumbersFromText(text) {\n  const matches = text.match(/-?\\d{3,}(\\.\\d+)?/g) || [];\n  return matches.map((m) => Math.round(Number(m))).filter((n) => Number.isFinite(n));\n}\n\nfunction validateRecommendationOutput(aiJson, fin, scenarioBundle) {\n  const errors = [];\n  if (!aiJson || typeof aiJson !== 'object') return { valid: false, errors: ['AI output is not valid JSON.'] };\n  if (!aiJson.primaryRecommendation) errors.push('Missing primaryRecommendation.');\n  if (!Array.isArray(aiJson.alternativeOptions)) errors.push('Missing alternativeOptions array.');\n  if (!Array.isArray(aiJson.notPreferredOptions)) errors.push('Missing notPreferredOptions array.');\n  if (!aiJson.disclaimer || typeof aiJson.disclaimer !== 'string' || aiJson.disclaimer.length < 10) errors.push('Missing or insufficient disclaimer.');\n\n  const bannedPhrases = ['guarantee', 'guaranteed', 'will be approved', 'assured approval', 'promise'];\n  const allText = JSON.stringify(aiJson).toLowerCase();\n  bannedPhrases.forEach((p) => { if (allText.includes(p)) errors.push(`AI output contains a disallowed guarantee-style phrase: \"${p}\".`); });\n\n  const engineNumbers = collectEngineNumbers(fin, scenarioBundle);\n  const citedNumbers = extractNumbersFromText(JSON.stringify(aiJson));\n  const unverifiable = citedNumbers.filter((n) => !engineNumbers.some((e) => Math.abs(e - n) < Math.max(1, e * 0.01)));\n  const materialUnverifiable = unverifiable.filter((n) => n > 100);\n  if (materialUnverifiable.length > 0) errors.push(`AI output cites figures not found in engine output: ${materialUnverifiable.slice(0, 5).join(', ')}`);\n\n  // If the engine context itself failed to load, we cannot trust any AI output that claims to be based on it.\n  if (!fin) errors.push('Deterministic engine context unavailable — cannot verify AI output.');\n\n  return { valid: errors.length === 0, errors };\n}\n\nfunction buildFailClosedRecommendation(classifications, fin) {\n  // A deterministic, engine-only fallback used ONLY if the AI output cannot be trusted\n  // (or the engine context itself could not be retrieved). Every field below uses\n  // optional chaining so this function itself can never throw.\n  const safeClassifications = Array.isArray(classifications) ? classifications : [];\n  const isHealthy = safeClassifications.length === 1 && safeClassifications[0] === 'HEALTHY';\n  return {\n    aiUnavailable: true,\n    summaryForOwner: isHealthy\n      ? 'Based on the numbers provided, your current loan payments appear manageable.'\n      : 'We were not able to generate a fully verified explanation this time, but here is what the numbers show.',\n    primaryRecommendation: isHealthy\n      ? { title: 'Continue monitoring', explanation: 'No restructuring is indicated by the current numbers. Keep an eye on your cash cushion and upcoming EMIs.', supportingNumbers: [] }\n      : { title: 'Review the figures below with a financial advisor or your lender', explanation: 'An automated explanation could not be safely verified. The underlying calculations (available below) are accurate and can be used as-is for a discussion with your lender or a Chartered Accountant.', supportingNumbers: [] },\n    alternativeOptions: [],\n    notPreferredOptions: [],\n    risksAndTradeoffs: ['This is a fallback summary. Please review the detailed financial view before making decisions.'],\n    technicalDetails: { internalDSCR: fin?.internalDSCR ?? null, emiToAvailableRatio: fin?.emiToAvailableRatio ?? null, note: 'Fallback path — AI explanation failed validation or the deterministic engine context was unavailable.' },\n    disclaimer: 'This is an estimate based on the information provided. It is not a loan approval, lender decision, or financial guarantee of any kind.',\n  };\n}\n\nconst text = extractText(httpResponse);\nconst parsed = safeParseJSON(text);\nconst validation2 = validateRecommendationOutput(parsed, fin, scenarioBundle);\n\nconst recommendation = validation2.valid ? parsed : buildFailClosedRecommendation(classifications, fin);\n\nreturn [{\n  json: {\n    data,\n    validation,\n    reconciliationResults,\n    fin,\n    scenarioBundle,\n    classifications,\n    dataConfidence,\n    recommendation,\n    recommendationValidation: validation2,\n  },\n}];\n"
+      },
+      "id": "n8",
+      "name": "Validate & Parse Recommendation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// n8n Code node — \"Build Bank Report Prompt\"\n\nconst input = $input.first().json;\nconst { data, fin, scenarioBundle, classifications, recommendation } = input;\n\nconst systemPrompt = `You are the report-writing layer of RESTRUCTRA. Produce a \"Bank-Ready Discussion Plan\" for an MSME owner to take to their lender.\n\nSTRICT RULES (identical to the recommendation step):\n1. Only use numbers found in ENGINE_OUTPUT or in RECOMMENDATION (already-validated). Never invent numbers.\n2. Never guarantee approval, an interest rate, or any lender decision.\n3. Never claim to know a specific lender's internal policy.\n4. Keep tone evidence-based and professional — suitable to hand to a bank relationship manager.\n5. Return ONLY valid JSON, no markdown fences.\n\nOUTPUT SCHEMA (all fields are strings unless noted; arrays of strings are bullet points):\n{\n  \"title\": \"MSME Loan Restructuring Discussion Plan\",\n  \"businessSituation\": \"string\",\n  \"currentRepaymentSituation\": \"string\",\n  \"mainReasonForPressure\": \"string\",\n  \"estimatedComfortableRepaymentRange\": \"string\",\n  \"recommendedOption\": \"string\",\n  \"alternativeOptions\": [\"string\"],\n  \"whyRecommendationMakesSense\": \"string\",\n  \"risksAndTradeoffs\": [\"string\"],\n  \"evidenceSupportingRequest\": [\"string\"],\n  \"documentsToTakeToLender\": [\"string\"],\n  \"questionsLenderMayAsk\": [\"string\"],\n  \"suggestedEvidenceBasedResponses\": [\"string\"],\n  \"nextSteps\": [\"string\"],\n  \"disclaimer\": \"string\"\n}`;\n\nconst userPrompt = `ENGINE_OUTPUT:\n${JSON.stringify({ business: data.business, loans: data.loans, fin, scenarios: scenarioBundle.scenarios, classifications }, null, 2)}\n\nRECOMMENDATION (already generated and validated in the previous step):\n${JSON.stringify(recommendation, null, 2)}\n\nWrite the Bank-Ready Discussion Plan JSON described in the system prompt, consistent with the recommendation above.`;\n\nreturn [{\n  json: {\n    ...input,\n    bankReportRequest: {\n      model: 'claude-sonnet-4-6',\n      max_tokens: 2000,\n      system: systemPrompt,\n      messages: [{ role: 'user', content: userPrompt }],\n    },\n  },\n}];\n"
+      },
+      "id": "n9",
+      "name": "Build Bank Report Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1820,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.bankReportRequest) }}",
+        "options": {}
+      },
+      "id": "n10",
+      "name": "AI Bank Report (Anthropic)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2080,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Anthropic API Key (x-api-key header)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// n8n Code node — \"Validate & Parse Bank Report (fail-closed)\"\n//\n// DATA-FLOW NOTE (fix): after the \"AI Bank Report\" HTTP Request node runs,\n// $input.first().json is the Anthropic HTTP response — NOT the deterministic\n// engine output or the already-validated recommendation. Both must be\n// fetched explicitly from the node that produced them, by name, via\n// $node[...]. The placeholder Validate & Parse Recommendation below is\n// substituted at build time (see workflows/build_workflow.js /\n// build_modules.js) with the exact name of the upstream node that carries\n// {data, fin, scenarioBundle, classifications, dataConfidence,\n// reconciliationResults, recommendation, recommendationValidation} for\n// whichever workflow this file is assembled into.\n//\n// If ANY validation check fails, we do NOT fabricate a fallback report with\n// invented numbers — we fail closed to a deterministic, engine-only summary.\n\nconst httpResponse = $input.first().json;\nconst priorContext = ($node[\"Validate & Parse Recommendation\"] && $node[\"Validate & Parse Recommendation\"].json) || {};\nconst { data, validation, reconciliationResults, fin, scenarioBundle, classifications, dataConfidence, recommendation, recommendationValidation } = priorContext;\n\nfunction extractText(httpResponse) {\n  try {\n    const content = httpResponse?.content || httpResponse?.body?.content;\n    if (!Array.isArray(content)) return null;\n    const textBlock = content.find((b) => b.type === 'text');\n    return textBlock ? textBlock.text : null;\n  } catch (e) { return null; }\n}\nfunction safeParseJSON(text) {\n  if (!text) return null;\n  const cleaned = text.replace(/```json/gi, '').replace(/```/g, '').trim();\n  try { return JSON.parse(cleaned); } catch (e) { return null; }\n}\nfunction collectEngineNumbers(fin, scenarioBundle) {\n  const nums = [];\n  const push = (v) => { if (typeof v === 'number' && Number.isFinite(v)) nums.push(Math.round(v)); };\n  Object.values(fin || {}).forEach((v) => push(v));\n  if (fin?.comfortableEMIRange) { push(fin.comfortableEMIRange.lower); push(fin.comfortableEMIRange.upper); }\n  const walk = (obj) => { if (!obj || typeof obj !== 'object') return; Object.values(obj).forEach((v) => { if (typeof v === 'number') push(v); else if (typeof v === 'object') walk(v); }); };\n  walk(scenarioBundle?.scenarios);\n  return nums;\n}\nfunction extractNumbersFromText(text) {\n  const matches = text.match(/-?\\d{3,}(\\.\\d+)?/g) || [];\n  return matches.map((m) => Math.round(Number(m))).filter((n) => Number.isFinite(n));\n}\n\nconst REQUIRED_SECTIONS = ['title', 'businessSituation', 'currentRepaymentSituation', 'mainReasonForPressure', 'estimatedComfortableRepaymentRange', 'recommendedOption', 'alternativeOptions', 'whyRecommendationMakesSense', 'risksAndTradeoffs', 'evidenceSupportingRequest', 'documentsToTakeToLender', 'questionsLenderMayAsk', 'suggestedEvidenceBasedResponses', 'nextSteps', 'disclaimer'];\n\nfunction validateBankReport(report, fin, scenarioBundle) {\n  const errors = [];\n  if (!report || typeof report !== 'object') return { valid: false, errors: ['Bank report is not valid JSON.'] };\n  REQUIRED_SECTIONS.forEach((k) => { if (!(k in report)) errors.push(`Missing section: ${k}`); });\n\n  const bannedPhrases = ['guarantee', 'guaranteed', 'will be approved', 'assured approval', 'promise'];\n  const allText = JSON.stringify(report).toLowerCase();\n  bannedPhrases.forEach((p) => { if (allText.includes(p)) errors.push(`Bank report contains a disallowed guarantee-style phrase: \"${p}\".`); });\n\n  const engineNumbers = collectEngineNumbers(fin, scenarioBundle);\n  const citedNumbers = extractNumbersFromText(JSON.stringify(report));\n  const unverifiable = citedNumbers.filter((n) => !engineNumbers.some((e) => Math.abs(e - n) < Math.max(1, e * 0.01)));\n  const materialUnverifiable = unverifiable.filter((n) => n > 100);\n  if (materialUnverifiable.length > 0) errors.push(`Bank report cites figures not found in engine output: ${materialUnverifiable.slice(0, 5).join(', ')}`);\n\n  if (!fin) errors.push('Deterministic engine context unavailable — cannot verify bank report output.');\n\n  return { valid: errors.length === 0, errors };\n}\n\nfunction buildFailClosedReport(fin, recommendation) {\n  // Every field uses optional chaining / nullish coalescing so this can never throw,\n  // even if the upstream context could not be retrieved at all.\n  return {\n    aiUnavailable: true,\n    title: 'MSME Loan Restructuring Discussion Plan (Basic Version)',\n    businessSituation: 'Automated narrative could not be safely verified this time. Figures below are from the deterministic financial engine and are accurate.',\n    currentRepaymentSituation: `Total monthly EMI: Rs. ${fin?.totalMonthlyEMI ?? 'N/A'}. Estimated money left after expenses: Rs. ${fin?.availableAfterExpenses ?? 'N/A'}.`,\n    mainReasonForPressure: 'Not available in fallback mode — see detailed financial view.',\n    estimatedComfortableRepaymentRange: fin?.comfortableEMIRange ? `Rs. ${fin.comfortableEMIRange.lower} to Rs. ${fin.comfortableEMIRange.upper} (illustrative).` : 'Not available.',\n    recommendedOption: recommendation?.primaryRecommendation?.title || 'See detailed financial view.',\n    alternativeOptions: [],\n    whyRecommendationMakesSense: 'Not available in fallback mode.',\n    risksAndTradeoffs: ['This is a fallback summary generated without AI narrative. Please review the full numbers before your lender meeting.'],\n    evidenceSupportingRequest: [],\n    documentsToTakeToLender: ['Last 6 months bank statement', 'Latest loan statement(s)', 'GST/sales summary (if available)'],\n    questionsLenderMayAsk: [],\n    suggestedEvidenceBasedResponses: [],\n    nextSteps: ['Review the detailed financial view', 'Consult a Chartered Accountant if numbers are unclear', 'Contact your lender to discuss options'],\n    disclaimer: 'This is an estimate based on the information provided. It is not a loan approval, lender decision, or financial guarantee of any kind.',\n  };\n}\n\nconst text = extractText(httpResponse);\nconst parsed = safeParseJSON(text);\nconst validation2 = validateBankReport(parsed, fin, scenarioBundle);\nconst bankReport = validation2.valid ? parsed : buildFailClosedReport(fin, recommendation);\n\nreturn [{\n  json: {\n    data,\n    validation,\n    reconciliationResults,\n    fin,\n    scenarioBundle,\n    classifications,\n    dataConfidence,\n    recommendation,\n    recommendationValidation,\n    bankReport,\n    bankReportValidation: validation2,\n  },\n}];\n"
+      },
+      "id": "n11",
+      "name": "Validate & Parse Bank Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2340,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// n8n Code node — \"Assemble Final Response\"\n\nconst input = $input.first().json;\nconst { data, fin, reconciliationResults, classifications, dataConfidence, recommendation, bankReport } = input;\n// Defensive fallbacks: this node runs directly after \"Validate & Parse Bank\n// Report\" (no HTTP node in between), so these should always be present —\n// but we never assume it, per the fail-closed requirement.\nconst safeFin = fin || {};\nconst safeReconciliation = Array.isArray(reconciliationResults) ? reconciliationResults : [];\nconst safeClassifications = Array.isArray(classifications) ? classifications : [];\n\nconst FRIENDLY_LABELS = {\n  HEALTHY: 'Your business appears financially healthy',\n  WATCH: 'Manageable now, but your safety cushion is limited',\n  TEMPORARY_LIQUIDITY_STRESS: 'Cash timing / customer payment delays are creating pressure',\n  HIGH_EMI_BURDEN: 'Your monthly loan payments are consuming too much of your available cash',\n  SEASONAL_CASH_FLOW_STRESS: 'Your business income varies significantly by season',\n  HIGH_INTEREST_BURDEN: 'High interest costs are adding to your repayment pressure',\n  MULTIPLE_LOAN_COMPLEXITY: 'Multiple loans are adding complexity to your repayments',\n  STRUCTURAL_CASH_FLOW_PROBLEM: 'Restructuring alone may not fully solve the underlying cash-flow problem',\n};\n\nconst dashboard = {\n  monthlySales: data?.business?.monthlySales ?? null,\n  monthlyBusinessExpenses: data?.business?.monthlyExpenses ?? null,\n  monthlyLoanPayments: safeFin.totalMonthlyEMI ?? null,\n  estimatedMoneyLeftAfterExpenses: safeFin.availableAfterExpenses ?? null,\n  estimatedMoneyLeftAfterLoanPayments: safeFin.availableAfterEMI ?? null,\n  totalLoanAmountLeft: safeFin.totalOutstandingDebt ?? null,\n  financialHealth: safeClassifications.map((c) => FRIENDLY_LABELS[c] || c),\n  mainConcern: data?.mainProblem ?? null,\n  estimatedComfortableEMIRange: safeFin.comfortableEMIRange ?? null,\n  recommendedAction: recommendation?.primaryRecommendation?.title || 'Not available',\n  dataConfidence,\n};\n\nconst needsUserConfirmation = safeReconciliation.some((r) => r.hasConflicts);\n\nreturn [{\n  json: {\n    status: 'success',\n    disclaimer: 'RESTRUCTRA is financial decision-support and lender-preparation software for MSMEs. It is not a lender, does not approve loans, and does not guarantee any outcome. All figures are estimates based on the information you provided.',\n    dashboard,\n    detailedFinancialView: safeFin,\n    stressClassifications: safeClassifications,\n    reconciliation: { needsUserConfirmation, results: safeReconciliation },\n    scenarios: input.scenarioBundle?.scenarios ?? null,\n    stressTestAssumptions: input.scenarioBundle?.stressAssumptions ?? null,\n    recommendation,\n    bankReadyDiscussionPlan: bankReport,\n    dataConfidence,\n  },\n}];\n"
+      },
+      "id": "n12",
+      "name": "Assemble Final Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2600,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "n13",
+      "name": "Respond - Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        2860,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "01-03 Intake, Documents, Reconciliation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "01-03 Intake, Documents, Reconciliation": {
+      "main": [
+        [
+          {
+            "node": "Input Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Input Valid?": {
+      "main": [
+        [
+          {
+            "node": "Respond - Validation Error",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "04-06 Financial Engine, Scenarios, Diagnosis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "04-06 Financial Engine, Scenarios, Diagnosis": {
+      "main": [
+        [
+          {
+            "node": "Build Recommendation Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Recommendation Prompt": {
+      "main": [
+        [
+          {
+            "node": "AI Recommendation (Anthropic)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Recommendation (Anthropic)": {
+      "main": [
+        [
+          {
+            "node": "Validate & Parse Recommendation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Parse Recommendation": {
+      "main": [
+        [
+          {
+            "node": "Build Bank Report Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Bank Report Prompt": {
+      "main": [
+        [
+          {
+            "node": "AI Bank Report (Anthropic)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Bank Report (Anthropic)": {
+      "main": [
+        [
+          {
+            "node": "Validate & Parse Bank Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Parse Bank Report": {
+      "main": [
+        [
+          {
+            "node": "Assemble Final Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assemble Final Response": {
+      "main": [
+        [
+          {
+            "node": "Respond - Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "restructra-demo"
+  }
+}

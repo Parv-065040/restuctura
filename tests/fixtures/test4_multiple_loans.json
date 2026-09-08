@@ -1,0 +1,62 @@
+{
+  "_label": "FICTIONAL TEST DATA \u2014 NOT A REAL FINANCIAL RECORD",
+  "businessName": "Shree Balaji Engineering Works",
+  "business": {
+    "type": "Manufacturing",
+    "monthlySales": 2600000,
+    "monthlyExpenses": 2000000,
+    "customersPayingLate": "Sometimes",
+    "receivablesAmount": 500000,
+    "incomeOutlook": "Stay similar",
+    "cashReserve": 400000
+  },
+  "loans": [
+    {
+      "id": "loan_1",
+      "lender": "HDFC Bank",
+      "loanType": "Business loan",
+      "outstandingAmount": 1500000,
+      "emi": 52000,
+      "remainingTenure": 30,
+      "remainingTenureUnit": "months",
+      "interestRatePct": 13.0,
+      "secured": "Yes"
+    },
+    {
+      "id": "loan_2",
+      "lender": "Bajaj Finserv",
+      "loanType": "Machinery/equipment loan",
+      "outstandingAmount": 900000,
+      "emi": 34000,
+      "remainingTenure": 24,
+      "remainingTenureUnit": "months",
+      "interestRatePct": 15.5,
+      "secured": "Yes"
+    },
+    {
+      "id": "loan_3",
+      "lender": "ICICI Bank",
+      "loanType": "Cash credit/overdraft",
+      "outstandingAmount": 500000,
+      "emi": 16000,
+      "remainingTenure": 20,
+      "remainingTenureUnit": "months",
+      "interestRatePct": 14.0,
+      "secured": "No"
+    },
+    {
+      "id": "loan_4",
+      "lender": "Tata Capital",
+      "loanType": "Other",
+      "outstandingAmount": 400000,
+      "emi": 14000,
+      "remainingTenure": 18,
+      "remainingTenureUnit": "months",
+      "interestRatePct": 16.5,
+      "secured": "No"
+    }
+  ],
+  "mainProblem": "I have multiple EMIs and they are difficult to manage",
+  "urgency": "In the next 1-3 months",
+  "documents": []
+}

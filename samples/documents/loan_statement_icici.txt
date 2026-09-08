@@ -1,0 +1,13 @@
+FICTIONAL TEST DATA — NOT A REAL FINANCIAL RECORD
+==================================================
+ICICI BANK — CASH CREDIT / OVERDRAFT STATEMENT
+Facility Account No: ICICI-CC-90031
+Borrower: Shree Balaji Engineering Works
+Loan Type: Cash Credit / Overdraft (Unsecured)
+Sanctioned Limit: Rs. 8,00,000
+Outstanding Utilised (as of 31-Jul-2026): Rs. 6,00,000
+Monthly Servicing Amount (treated as EMI-equivalent): Rs. 18,000
+Interest Rate: 14.0% p.a.
+Remaining Tenure (facility renewal cycle): 24 months
+Next Servicing Date: 10-Aug-2026
+Overdue Amount: Rs. 0

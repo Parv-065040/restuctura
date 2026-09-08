@@ -1,0 +1,29 @@
+{
+  "_label": "FICTIONAL TEST DATA \u2014 NOT A REAL FINANCIAL RECORD",
+  "businessName": "Shree Balaji Engineering Works",
+  "business": {
+    "type": "Manufacturing",
+    "monthlySales": 1800000,
+    "monthlyExpenses": 1400000,
+    "customersPayingLate": "No",
+    "receivablesAmount": 300000,
+    "incomeOutlook": "Stay similar",
+    "cashReserve": 250000
+  },
+  "loans": [
+    {
+      "id": "loan_1",
+      "lender": "Axis Bank",
+      "loanType": "Business loan",
+      "outstandingAmount": 5200000,
+      "emi": 310000,
+      "remainingTenure": 24,
+      "remainingTenureUnit": "months",
+      "interestRatePct": 14.5,
+      "secured": "Yes"
+    }
+  ],
+  "mainProblem": "EMI is too high every month",
+  "urgency": "In the next 1-3 months",
+  "documents": []
+}

@@ -1,0 +1,85 @@
+{
+  "name": "Module - 05 Stress Diagnosis",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "restructra/stress-diagnosis",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "m13",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "restructra-stress-diagnosis"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// n8n Code node — \"04-06: Financial Engine, Scenario Engine, Stress Diagnosis\"\n// All figures here are DETERMINISTIC. The LLM downstream is only allowed to\n// explain these numbers in simple language — never to invent or recompute them.\n\nconst input = $input.first().json.body || $input.first().json;\nconst data = input.data;\nconst validation = input.validation;\nconst reconciliationResults = input.reconciliationResults;\n\nfunction round2(n) { return n === null || n === undefined ? null : Math.round(n * 100) / 100; }\nfunction sumEMI(loans) {\n  const known = (loans || []).filter((l) => l.emi !== null);\n  if (known.length === 0) return null;\n  return known.reduce((s, l) => s + l.emi, 0);\n}\nfunction sumOutstanding(loans) {\n  const known = (loans || []).filter((l) => l.outstandingAmount !== null);\n  if (known.length === 0) return null;\n  return known.reduce((s, l) => s + l.outstandingAmount, 0);\n}\n\nfunction computeFinancials(data) {\n  const sales = data.business.monthlySales;\n  const expenses = data.business.monthlyExpenses;\n  const loans = data.loans || [];\n  const totalMonthlyEMI = sumEMI(loans);\n  const totalOutstandingDebt = sumOutstanding(loans);\n  const missingEMICount = loans.filter((l) => l.emi === null).length;\n  const availableAfterExpenses = sales !== null && expenses !== null ? round2(sales - expenses) : null;\n  const availableAfterEMI = availableAfterExpenses !== null && totalMonthlyEMI !== null ? round2(availableAfterExpenses - totalMonthlyEMI) : null;\n  const internalDSCR = availableAfterExpenses !== null && totalMonthlyEMI ? round2(availableAfterExpenses / totalMonthlyEMI) : null;\n  const emiToSalesRatio = sales && totalMonthlyEMI !== null ? round2(totalMonthlyEMI / sales) : null;\n  const emiToAvailableRatio = availableAfterExpenses !== null && availableAfterExpenses > 0 && totalMonthlyEMI !== null ? round2(totalMonthlyEMI / availableAfterExpenses) : null;\n  const cashReserve = data.business.cashReserve;\n  const cashBufferMonths = cashReserve !== null && totalMonthlyEMI ? round2(cashReserve / totalMonthlyEMI) : null;\n  const receivables = data.business.receivablesAmount;\n  const receivablesRatio = receivables !== null && sales ? round2(receivables / sales) : null;\n\n  let debtConcentration = 'UNKNOWN';\n  const knownOutstanding = loans.filter((l) => l.outstandingAmount !== null);\n  if (loans.length === 1) debtConcentration = 'SINGLE_LOAN';\n  else if (knownOutstanding.length >= 2 && totalOutstandingDebt) {\n    const maxShare = Math.max(...knownOutstanding.map((l) => l.outstandingAmount)) / totalOutstandingDebt;\n    debtConcentration = maxShare > 0.6 ? 'CONCENTRATED' : 'DISTRIBUTED';\n  }\n\n  const rated = loans.filter((l) => l.interestRatePct !== null && l.outstandingAmount !== null);\n  let weightedAvgInterestRate = null, interestRateAssumed = false;\n  if (rated.length > 0) {\n    const sumOut = rated.reduce((s, l) => s + l.outstandingAmount, 0);\n    weightedAvgInterestRate = round2(rated.reduce((s, l) => s + l.outstandingAmount * l.interestRatePct, 0) / sumOut);\n  } else { weightedAvgInterestRate = 14.0; interestRateAssumed = true; }\n\n  const tenured = loans.filter((l) => l.remainingTenureMonths !== null && l.outstandingAmount !== null);\n  let weightedAvgTenureMonths = null, tenureAssumed = false;\n  if (tenured.length > 0) {\n    const sumOut = tenured.reduce((s, l) => s + l.outstandingAmount, 0);\n    weightedAvgTenureMonths = Math.round(tenured.reduce((s, l) => s + l.outstandingAmount * l.remainingTenureMonths, 0) / sumOut);\n  } else { weightedAvgTenureMonths = 36; tenureAssumed = true; }\n\n  let comfortableEMIRange = null;\n  if (availableAfterExpenses !== null && availableAfterExpenses > 0) {\n    comfortableEMIRange = {\n      lower: round2(availableAfterExpenses * 0.4),\n      upper: round2(availableAfterExpenses * 0.55),\n      basis: 'Illustrative safety-cushion calculation: 40%-55% of estimated money left after business expenses. Not a lender-approved affordability limit.',\n    };\n  }\n\n  return { totalMonthlyEMI, totalOutstandingDebt, missingEMICount, availableAfterExpenses, availableAfterEMI, internalDSCR, emiToSalesRatio, emiToAvailableRatio, cashBufferMonths, receivablesRatio, debtConcentration, weightedAvgInterestRate, interestRateAssumed, weightedAvgTenureMonths, tenureAssumed, comfortableEMIRange };\n}\n\nfunction emiForLoan(principal, annualRatePct, tenureMonths) {\n  if (!principal || !tenureMonths) return null;\n  const r = annualRatePct / 12 / 100;\n  if (r === 0) return round2(principal / tenureMonths);\n  const factor = Math.pow(1 + r, tenureMonths);\n  return round2((principal * r * factor) / (factor - 1));\n}\nfunction totalRepayment(emi, months) { if (emi === null || !months) return null; return round2(emi * months); }\n\nconst STRESS_ASSUMPTIONS = { stressRevenueChangePct: -20, recoveryRevenueChangePct: 15, expensesHeldConstant: true };\nfunction availableUnderRevenueChange(sales, expenses, changePct) {\n  if (sales === null || expenses === null) return null;\n  return round2(sales * (1 + changePct / 100) - expenses);\n}\n\nfunction buildScenarios(data, fin) {\n  const sales = data.business.monthlySales, expenses = data.business.monthlyExpenses;\n  const outstanding = fin.totalOutstandingDebt, rate = fin.weightedAvgInterestRate, tenure = fin.weightedAvgTenureMonths, currentEMI = fin.totalMonthlyEMI;\n  const availBase = fin.availableAfterExpenses;\n  const availStress = availableUnderRevenueChange(sales, expenses, STRESS_ASSUMPTIONS.stressRevenueChangePct);\n  const availRecovery = availableUnderRevenueChange(sales, expenses, STRESS_ASSUMPTIONS.recoveryRevenueChangePct);\n  function testCase(emi) {\n    if (emi === null) return null;\n    return { base: availBase !== null ? round2(availBase - emi) : null, stress: availStress !== null ? round2(availStress - emi) : null, recovery: availRecovery !== null ? round2(availRecovery - emi) : null };\n  }\n\n  const scenarios = {};\n  scenarios.current = { label: 'Current repayment (no change)', emi: currentEMI, tenureMonths: tenure, estimatedRemainingRepayment: totalRepayment(currentEMI, tenure), monthlySurplusDeficit: testCase(currentEMI), note: 'Reflects the loan terms as currently reported.' };\n\n  if (outstanding && tenure && rate !== null) {\n    scenarios.longerRepayment = {};\n    [0.25, 0.5, 1.0].forEach((extPct) => {\n      const key = `extend_${Math.round(extPct * 100)}pct`;\n      const newTenure = Math.round(tenure * (1 + extPct));\n      const newEMI = emiForLoan(outstanding, rate, newTenure);\n      scenarios.longerRepayment[key] = {\n        label: `Extend remaining tenure by ${Math.round(extPct * 100)}%`,\n        newTenureMonths: newTenure, newEMI,\n        emiReduction: currentEMI !== null && newEMI !== null ? round2(currentEMI - newEMI) : null,\n        estimatedAdditionalInterest: totalRepayment(newEMI, newTenure) !== null && totalRepayment(currentEMI, tenure) !== null ? round2(totalRepayment(newEMI, newTenure) - totalRepayment(currentEMI, tenure)) : null,\n        monthlySurplusDeficit: testCase(newEMI),\n        disclaimer: 'Illustrative scenario only. Actual terms depend on lender approval.',\n      };\n    });\n    scenarios.longerRepayment.default = 'extend_50pct';\n  } else scenarios.longerRepayment = { unavailable: true, reason: 'Insufficient data (outstanding amount, tenure, or interest rate missing).' };\n\n  if (outstanding && tenure && rate !== null) {\n    const reliefMonths = 3, monthlyRate = rate / 12 / 100;\n    const accruedInterest = round2(outstanding * monthlyRate * reliefMonths);\n    const newPrincipal = round2(outstanding + accruedInterest);\n    const postReliefEMI = emiForLoan(newPrincipal, rate, tenure);\n    scenarios.temporaryRelief = {\n      label: `${reliefMonths}-month illustrative payment relief`, reliefMonths, paymentDuringRelief: 0,\n      assumedInterestTreatment: 'Interest continues to accrue during relief and is added to outstanding principal.',\n      accruedInterestDuringRelief: accruedInterest, postReliefEMI, postReliefTenureMonths: tenure,\n      totalTimelineMonths: tenure + reliefMonths,\n      monthlySurplusDeficitDuringRelief: testCase(0),\n      monthlySurplusDeficitAfterRelief: testCase(postReliefEMI),\n      disclaimer: 'Illustrative scenario only. The lender may or may not offer this exact structure.',\n    };\n  } else scenarios.temporaryRelief = { unavailable: true, reason: 'Insufficient data (outstanding amount, tenure, or interest rate missing).' };\n\n  if (outstanding && tenure && rate !== null && currentEMI !== null) {\n    const stepMonths = 6, reducedEMI = round2(currentEMI * 0.6);\n    const principalPaidInStep = round2(reducedEMI * stepMonths);\n    const monthlyRate = rate / 12 / 100;\n    const interestDuringStep = round2(outstanding * monthlyRate * stepMonths);\n    const remainingPrincipalAfterStep = round2(Math.max(outstanding + interestDuringStep - principalPaidInStep, 0));\n    const remainingTenureAfterStep = Math.max(tenure - stepMonths, 1);\n    const subsequentEMI = emiForLoan(remainingPrincipalAfterStep, rate, remainingTenureAfterStep);\n    scenarios.stepDown = {\n      label: `Reduced EMI for ${stepMonths} months, then step up`, stepMonths, reducedEMI, subsequentEMI,\n      subsequentTenureMonths: remainingTenureAfterStep, totalTimelineMonths: stepMonths + remainingTenureAfterStep,\n      monthlySurplusDeficitDuringStep: testCase(reducedEMI), monthlySurplusDeficitAfterStep: testCase(subsequentEMI),\n      simplification: 'Principal/interest split during the step-down period is approximated, not a full amortization schedule.',\n      disclaimer: 'Illustrative scenario only. Actual terms depend on lender approval.',\n    };\n  } else scenarios.stepDown = { unavailable: true, reason: 'Insufficient data.' };\n\n  const loans = data.loans || [];\n  if (loans.length >= 2) {\n    const allHaveData = loans.every((l) => l.outstandingAmount !== null && l.interestRatePct !== null && l.remainingTenureMonths !== null);\n    if (allHaveData) {\n      const consolidatedTenure = Math.max(...loans.map((l) => l.remainingTenureMonths));\n      const consolidatedEMI = emiForLoan(outstanding, rate, consolidatedTenure);\n      const emiReductionPct = currentEMI ? round2(((currentEMI - consolidatedEMI) / currentEMI) * 100) : null;\n      const meaningfullyBeneficial = emiReductionPct !== null && emiReductionPct >= 15;\n      scenarios.consolidation = {\n        label: 'Consolidate all loans into a single facility', consolidatedOutstanding: outstanding, consolidatedEMI,\n        consolidatedTenureMonths: consolidatedTenure, emiReduction: currentEMI !== null ? round2(currentEMI - consolidatedEMI) : null,\n        emiReductionPct, recommended: meaningfullyBeneficial, monthlySurplusDeficit: testCase(consolidatedEMI),\n        note: meaningfullyBeneficial ? 'Calculated reduction is meaningful (>=15%). Presented as an option, not an automatic recommendation.' : 'Calculated benefit is not large enough to recommend consolidation on its own.',\n        disclaimer: 'Illustrative scenario only. Actual consolidated terms depend on lender approval.',\n      };\n    } else scenarios.consolidation = { unavailable: true, reason: 'Consolidation cannot be reliably assessed from the available information (missing rate/tenure/outstanding on at least one loan).' };\n  } else scenarios.consolidation = { notApplicable: true, reason: 'Only one loan reported.' };\n\n  return { scenarios, stressAssumptions: STRESS_ASSUMPTIONS };\n}\n\nfunction diagnoseStress(data, fin, scenarioBundle) {\n  const classifications = new Set();\n  const { internalDSCR, cashBufferMonths, receivablesRatio, emiToAvailableRatio, weightedAvgInterestRate, interestRateAssumed } = fin;\n  const loans = data.loans || [];\n  const dscrKnown = internalDSCR !== null, bufferKnown = cashBufferMonths !== null;\n\n  if (dscrKnown && internalDSCR >= 1.6 && (!bufferKnown || cashBufferMonths >= 2) && (receivablesRatio === null || receivablesRatio < 0.3)) classifications.add('HEALTHY');\n  else if (dscrKnown && internalDSCR >= 1.15) classifications.add('WATCH');\n\n  if (emiToAvailableRatio !== null && emiToAvailableRatio > 0.6) classifications.add('HIGH_EMI_BURDEN');\n  if (receivablesRatio !== null && receivablesRatio > 0.35 && ['Yes', 'Sometimes'].includes(data.business.customersPayingLate)) classifications.add('TEMPORARY_LIQUIDITY_STRESS');\n  if (data.mainProblem === 'My business is seasonal') classifications.add('SEASONAL_CASH_FLOW_STRESS');\n  if (!interestRateAssumed && weightedAvgInterestRate !== null && weightedAvgInterestRate > 16) classifications.add('HIGH_INTEREST_BURDEN');\n  if (loans.length >= 3) classifications.add('MULTIPLE_LOAN_COMPLEXITY');\n  if (dscrKnown && internalDSCR < 1.0 && classifications.size === 0) classifications.add('WATCH');\n\n  if (scenarioBundle && scenarioBundle.scenarios) {\n    const s = scenarioBundle.scenarios;\n    const candidateBaseValues = [];\n    if (s.current?.monthlySurplusDeficit?.base !== undefined) candidateBaseValues.push(s.current.monthlySurplusDeficit.base);\n    if (s.longerRepayment && !s.longerRepayment.unavailable) Object.values(s.longerRepayment).forEach((v) => { if (v && typeof v === 'object' && v.monthlySurplusDeficit) candidateBaseValues.push(v.monthlySurplusDeficit.base); });\n    if (s.temporaryRelief && !s.temporaryRelief.unavailable) candidateBaseValues.push(s.temporaryRelief.monthlySurplusDeficitAfterRelief?.base);\n    if (s.stepDown && !s.stepDown.unavailable) candidateBaseValues.push(s.stepDown.monthlySurplusDeficitAfterStep?.base);\n    if (s.consolidation && !s.consolidation.unavailable && !s.consolidation.notApplicable) candidateBaseValues.push(s.consolidation.monthlySurplusDeficit?.base);\n    const validCandidates = candidateBaseValues.filter((v) => v !== null && v !== undefined);\n    if (validCandidates.length > 0 && Math.max(...validCandidates) < 0) classifications.add('STRUCTURAL_CASH_FLOW_PROBLEM');\n  }\n\n  if (classifications.size === 0) classifications.add('WATCH');\n  return Array.from(classifications);\n}\n\nfunction computeDataConfidence(data, validation, reconciliationResults, fin) {\n  let score = 100;\n  score -= validation.warnings.length * 8;\n  const conflictCount = (reconciliationResults || []).reduce((s, r) => s + (r.conflicts ? r.conflicts.length : 0), 0);\n  score -= conflictCount * 15;\n  if (data.documents.length === 0) score -= 10;\n  if (fin.tenureAssumed) score -= 12;\n  if (fin.interestRateAssumed) score -= 12;\n  if (fin.missingEMICount > 0) score -= fin.missingEMICount * 10;\n  score = Math.max(0, Math.min(100, score));\n  let level = 'HIGH';\n  if (score < 50) level = 'LOW'; else if (score < 80) level = 'MEDIUM';\n  return { score, level };\n}\n\nconst fin = computeFinancials(data);\nconst scenarioBundle = buildScenarios(data, fin);\nconst classifications = diagnoseStress(data, fin, scenarioBundle);\nconst dataConfidence = computeDataConfidence(data, validation, reconciliationResults, fin);\n\nreturn [{ json: { data, validation, reconciliationResults, fin, scenarioBundle, classifications, dataConfidence } }];\n"
+      },
+      "id": "m14",
+      "name": "05 Stress Diagnosis",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { classifications: $json.classifications, dataConfidence: $json.dataConfidence } }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "m15",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        520,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "05 Stress Diagnosis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "05 Stress Diagnosis": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "restructra-demo"
+  }
+}

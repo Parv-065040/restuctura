@@ -1,0 +1,85 @@
+{
+  "name": "Module - 09 Early Warning",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "restructra/early-warning",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "m29",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "restructra-early-warning"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// n8n Code node — \"09 Early Warning\" (optional / V2, deterministic only)\n// Input: expects the same normalized `data` + `fin` shape produced by the\n// main pipeline (pass the stored financial_snapshots row, or re-run\n// 01-03 + 04-06 upstream of this node).\n\nconst input = $input.first().json.body || $input.first().json;\nconst { data, fin } = input;\n\nconst warnings = [];\n\nif (fin.cashBufferMonths !== null && fin.cashBufferMonths < 1) {\n  warnings.push({\n    type: 'LOW_CASH_BUFFER',\n    message: 'Your cash reserve covers less than one month of your loan payments.',\n    horizonDays: 30,\n  });\n}\n\nif (fin.availableAfterEMI !== null && fin.availableAfterEMI < 0) {\n  warnings.push({\n    type: 'NEGATIVE_MONTHLY_CASHFLOW',\n    message: 'Based on current figures, your monthly loan payments exceed the money left after expenses.',\n    horizonDays: 30,\n  });\n}\n\nif (data.business.incomeOutlook === 'Decrease' && fin.emiToAvailableRatio !== null && fin.emiToAvailableRatio > 0.5) {\n  warnings.push({\n    type: 'DECLINING_OUTLOOK_WITH_HIGH_EMI_SHARE',\n    message: 'You expect income to fall over the next few months while EMI already takes up a large share of available cash. This combination raises repayment risk.',\n    horizonDays: 60,\n  });\n}\n\nif (fin.receivablesRatio !== null && fin.receivablesRatio > 0.4 && ['Yes', 'Sometimes'].includes(data.business.customersPayingLate)) {\n  warnings.push({\n    type: 'RECEIVABLES_BUILDUP',\n    message: 'Money owed by customers is large relative to monthly sales and customers are paying late. This could delay your ability to pay EMIs on time.',\n    horizonDays: 45,\n  });\n}\n\nconst hasWarning = warnings.length > 0;\n\nreturn [{\n  json: {\n    earlyWarning: {\n      hasWarning,\n      summary: hasWarning\n        ? 'Potential repayment stress detected in the next 30-60 days based on current figures.'\n        : 'No early-warning signals detected from the information available.',\n      warnings,\n      disclaimer: 'This is an automated, rule-based signal from the figures provided — not a prediction or a lender assessment.',\n    },\n  },\n}];\n"
+      },
+      "id": "m30",
+      "name": "09 Early Warning",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json.earlyWarning }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "m31",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        520,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "09 Early Warning",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "09 Early Warning": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "restructra-demo"
+  }
+}

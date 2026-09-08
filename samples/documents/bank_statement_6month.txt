@@ -1,0 +1,35 @@
+FICTIONAL TEST DATA — NOT A REAL FINANCIAL RECORD
+==================================================
+HDFC BANK — CURRENT ACCOUNT STATEMENT
+Account Holder: Shree Balaji Engineering Works
+Account No: XXXXXXXX4471
+Statement Period: 01-Feb-2026 to 31-Jul-2026
+Branch: MIDC Bhosari, Pune
+
+Opening Balance (01-Feb-2026): Rs. 3,80,000.00
+Closing Balance (31-Jul-2026): Rs. 3,50,000.00
+
+-----------------------------------------------------------------------------------
+Date        Description                                   Debit        Credit
+-----------------------------------------------------------------------------------
+05-Feb-2026 NEFT-CR-Precision Auto Components Pvt Ltd                   6,20,000.00
+07-Feb-2026 EMI-HDFC BUSINESS LOAN xx8891                   78,500.00
+09-Feb-2026 EMI-BAJAJ FINSERV MACHINERY LOAN                42,000.00
+10-Feb-2026 EMI-ICICI CC FACILITY                            18,000.00
+12-Feb-2026 Salary & Wages Payout                         5,40,000.00
+15-Feb-2026 NEFT-CR-Sunrise Metal Traders                                4,10,000.00
+18-Feb-2026 GST Payment                                      2,10,000.00
+20-Feb-2026 Raw Material Purchase - SteelCo                  6,80,000.00
+25-Feb-2026 NEFT-CR-Precision Auto Components Pvt Ltd                   5,90,000.00
+28-Feb-2026 Electricity & Utilities                             85,000.00
+...
+(entries continue in the same pattern for Mar-Jul 2026)
+-----------------------------------------------------------------------------------
+
+Six-month summary (Feb-Jul 2026):
+Total Credits (approx):      Rs. 1,21,80,000
+Total Debits (approx):       Rs. 1,20,10,000
+Average monthly EMI debits identified: HDFC 78,500 + Bajaj 42,000 + ICICI 18,000 = Rs. 1,38,500
+
+NOTE: Not every credit line is customer revenue — some entries are inter-account
+transfers. RESTRUCTRA does not treat every bank credit as revenue automatically.

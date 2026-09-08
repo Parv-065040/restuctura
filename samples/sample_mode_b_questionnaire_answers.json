@@ -1,0 +1,44 @@
+{
+  "_label": "FICTIONAL TEST DATA \u2014 sample answers as a real MSME owner might type them",
+  "Q1_whatDoesYourBusinessDo": "Manufacturing",
+  "Q2_monthlySales": "20,00,000 (roughly)",
+  "Q3_monthlyExpenses": "16,80,000 (roughly)",
+  "Q4_customersPayingLate": "Yes",
+  "Q5_receivables": "around 9,50,000",
+  "Q6_incomeOutlookNext3to6Months": "Stay similar",
+  "Q7_numberOfLoans": 3,
+  "loan1": {
+    "bank": "HDFC Bank",
+    "type": "Business loan",
+    "amountLeft": "28,00,000",
+    "emi": "78,500",
+    "remaining": "3 years",
+    "rate": "13.5%"
+  },
+  "loan2": {
+    "bank": "Bajaj Finserv",
+    "type": "Machinery/equipment loan",
+    "amountLeft": "12,00,000",
+    "emi": "42,000",
+    "remaining": "30 months",
+    "rate": "15%"
+  },
+  "loan3": {
+    "bank": "ICICI Bank",
+    "type": "Cash credit/overdraft",
+    "amountLeft": "6,00,000",
+    "emi": "18,000",
+    "remaining": "2 years",
+    "rate": "Don't know exact number, around 14%"
+  },
+  "mainProblem": "Customers haven't paid me yet",
+  "urgency": "In the next 1-3 months",
+  "documentsUploaded": [
+    "bank_statement_6month.txt",
+    "loan_statement_hdfc.txt",
+    "loan_statement_bajaj.txt",
+    "loan_statement_icici.txt",
+    "gst_sales_summary.txt",
+    "receivables_list.txt"
+  ]
+}

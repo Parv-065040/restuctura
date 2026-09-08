@@ -1,0 +1,40 @@
+{
+  "_label": "FICTIONAL TEST DATA \u2014 NOT A REAL FINANCIAL RECORD",
+  "businessName": "Shree Balaji Engineering Works",
+  "business": {
+    "type": "Manufacturing",
+    "monthlySales": 1200000,
+    "monthlyExpenses": 1150000,
+    "customersPayingLate": "Yes",
+    "receivablesAmount": 700000,
+    "incomeOutlook": "Decrease",
+    "cashReserve": 50000
+  },
+  "loans": [
+    {
+      "id": "loan_1",
+      "lender": "HDFC Bank",
+      "loanType": "Business loan",
+      "outstandingAmount": 4000000,
+      "emi": 185000,
+      "remainingTenure": 30,
+      "remainingTenureUnit": "months",
+      "interestRatePct": 15.0,
+      "secured": "Yes"
+    },
+    {
+      "id": "loan_2",
+      "lender": "Bajaj Finserv",
+      "loanType": "Machinery/equipment loan",
+      "outstandingAmount": 1500000,
+      "emi": 58000,
+      "remainingTenure": 24,
+      "remainingTenureUnit": "months",
+      "interestRatePct": 16.0,
+      "secured": "Yes"
+    }
+  ],
+  "mainProblem": "I am worried I may struggle to pay in the coming months",
+  "urgency": "I have already missed a payment",
+  "documents": []
+}

@@ -1,0 +1,1279 @@
+{
+  "name": "RESTRUCTRA — LIVE v2 DOCUMENT EXTRACTION",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "restructra/full-pipeline",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "672e0213-3a46-44a9-b006-de2fb0a1ae9b",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -400,
+        -272
+      ],
+      "webhookId": "restructra-full-pipeline"
+    },
+    {
+      "parameters": {
+        "jsCode": "// n8n Code node — \"01-03: Intake, Documents, Reconciliation\"\n// Mode: Run Once for All Items. Expects the webhook body at items[0].json.body\n// (Mode A: direct JSON; Mode B: same shape produced by the questionnaire frontend).\n//\n// DOCUMENT PROCESSING: multipart uploads are extracted upstream by native n8n\n// Extract From File nodes (PDF/XLSX/XLS/CSV/TXT/ODS/RTF). The resulting\n// documents[] objects contain fields[] for deterministic reconciliation.\n// Image-only/scanned PDFs are flagged as extractionFailed rather than guessed.\n// An OCR/vision provider can be added later without changing the financial engine.\n\nconst raw = $input.first().json.body || $input.first().json;\n\n// ---------- normalize ----------\nfunction toNumberOrNull(v) {\n  if (v === null || v === undefined || v === '' || v === \"I don't know\" || v === 'Not sure') return null;\n  const n = typeof v === 'number' ? v : Number(String(v).replace(/[₹,\\s]/g, ''));\n  return Number.isFinite(n) ? n : null;\n}\nfunction normalizeTenure(value, unit) {\n  const n = toNumberOrNull(value);\n  if (n === null) return null;\n  if (unit === 'years') return Math.round(n * 12);\n  return Math.round(n);\n}\nfunction normalizeInput(r) {\n  return {\n    business: {\n      type: r?.business?.type ?? null,\n      monthlySales: toNumberOrNull(r?.business?.monthlySales),\n      monthlyExpenses: toNumberOrNull(r?.business?.monthlyExpenses),\n      customersPayingLate: r?.business?.customersPayingLate ?? 'Not sure',\n      receivablesAmount: toNumberOrNull(r?.business?.receivablesAmount),\n      incomeOutlook: r?.business?.incomeOutlook ?? 'Not sure',\n      cashReserve: toNumberOrNull(r?.business?.cashReserve),\n    },\n    loans: Array.isArray(r?.loans)\n      ? r.loans.map((l, i) => ({\n          id: l.id || `loan_${i + 1}`,\n          lender: l.lender ?? null,\n          loanType: l.loanType ?? \"Don't know\",\n          outstandingAmount: toNumberOrNull(l.outstandingAmount),\n          emi: toNumberOrNull(l.emi),\n          remainingTenureMonths: normalizeTenure(l.remainingTenure, l.remainingTenureUnit),\n          interestRatePct: toNumberOrNull(l.interestRatePct),\n          secured: l.secured ?? null,\n        }))\n      : [],\n    mainProblem: r?.mainProblem ?? \"I'm not sure\",\n    urgency: r?.urgency ?? \"I'm not sure\",\n    documents: Array.isArray(r?.documents) ? r.documents : [],\n    businessName: r?.businessName ?? null,\n  };\n}\n\n// ---------- validate ----------\nfunction validateInput(data) {\n  const errors = [];\n  const warnings = [];\n  if (data.business.monthlySales === null) warnings.push({ field: 'monthlySales', message: 'Monthly sales not provided.' });\n  if (data.business.monthlyExpenses === null) warnings.push({ field: 'monthlyExpenses', message: 'Monthly expenses not provided.' });\n  if (data.business.monthlySales !== null && data.business.monthlySales < 0) errors.push({ field: 'monthlySales', message: 'Monthly sales cannot be negative.' });\n  if (data.business.monthlyExpenses !== null && data.business.monthlyExpenses < 0) errors.push({ field: 'monthlyExpenses', message: 'Monthly expenses cannot be negative.' });\n  if (!Array.isArray(data.loans) || data.loans.length === 0) {\n    warnings.push({ field: 'loans', message: 'No loans provided.' });\n  } else {\n    data.loans.forEach((l) => {\n      if (l.emi === null) warnings.push({ field: `${l.id}.emi`, message: `EMI missing for loan ${l.id}.` });\n      if (l.outstandingAmount === null) warnings.push({ field: `${l.id}.outstandingAmount`, message: `Outstanding amount missing for loan ${l.id}.` });\n      if (l.emi !== null && l.emi < 0) errors.push({ field: `${l.id}.emi`, message: 'EMI cannot be negative.' });\n      if (l.outstandingAmount !== null && l.outstandingAmount < 0) errors.push({ field: `${l.id}.outstandingAmount`, message: 'Outstanding amount cannot be negative.' });\n      if (l.interestRatePct !== null && (l.interestRatePct < 0 || l.interestRatePct > 60)) errors.push({ field: `${l.id}.interestRatePct`, message: 'Interest rate looks invalid.' });\n    });\n  }\n  return { isValid: errors.length === 0, errors, warnings };\n}\n\n// ---------- reconciliation ----------\nfunction sumEMI(loans) {\n  const known = (loans || []).filter((l) => l.emi !== null);\n  if (known.length === 0) return null;\n  return known.reduce((s, l) => s + l.emi, 0);\n}\nfunction sumOutstanding(loans) {\n  const known = (loans || []).filter((l) => l.outstandingAmount !== null);\n  if (known.length === 0) return null;\n  return known.reduce((s, l) => s + l.outstandingAmount, 0);\n}\nfunction reconcile(userData, extractedDoc) {\n  const conflicts = [];\n  const confirmations = [];\n  if (!extractedDoc || extractedDoc.extractionFailed || !Array.isArray(extractedDoc.fields) || extractedDoc.fields.length === 0) {\n    return {\n      documentType: extractedDoc?.documentType || 'unknown',\n      fileName: extractedDoc?.fileName || null,\n      conflicts,\n      confirmations,\n      hasConflicts: false,\n      extractionFailed: !!extractedDoc?.extractionFailed || (extractedDoc && extractedDoc.fields && extractedDoc.fields.length === 0),\n    };\n  }\n  const TOLERANCE = 0.03;\n  const userLookup = {\n    monthlyEMI: sumEMI(userData.loans),\n    totalOutstanding: sumOutstanding(userData.loans),\n    monthlySales: userData.business.monthlySales,\n  };\n  extractedDoc.fields.forEach((f) => {\n    if (!(f.field in userLookup)) return;\n    const userValue = userLookup[f.field];\n    const docValue = toNumberOrNull(f.value);\n    if (userValue === null || docValue === null) return;\n    const diffRatio = userValue === 0 ? (docValue === 0 ? 0 : 1) : Math.abs(userValue - docValue) / Math.abs(userValue);\n    const record = {\n      field: f.field,\n      userValue,\n      documentValue: docValue,\n      source: f.source,\n      confidence: f.confidence,\n      diffPct: Math.round(diffRatio * 1000) / 10,\n    };\n    if (diffRatio > TOLERANCE) conflicts.push({ ...record, status: 'CONFLICT', actionRequired: true });\n    else confirmations.push({ ...record, status: 'CONFIRMED', actionRequired: false });\n  });\n  return {\n    documentType: extractedDoc.documentType || 'unknown',\n    fileName: extractedDoc.fileName || null,\n    conflicts,\n    confirmations,\n    hasConflicts: conflicts.length > 0,\n    extractionFailed: false,\n  };\n}\n\n// ---------- run ----------\nconst data = normalizeInput(raw);\nconst validation = validateInput(data);\nconst reconciliationResults = (data.documents || []).map((doc) => reconcile(data, doc));\nconst anyExtractionFailed = reconciliationResults.some((r) => r.extractionFailed);\nconst anyConflicts = reconciliationResults.some((r) => r.hasConflicts);\n\nreturn [\n  {\n    json: {\n      data,\n      validation,\n      reconciliationResults,\n      anyExtractionFailed,\n      anyConflicts,\n    },\n  },\n];\n"
+      },
+      "id": "ab202415-579e-44db-ab5f-8a0cb6930ba0",
+      "name": "01-03 Intake, Documents, Reconciliation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -144,
+        -272
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond1",
+              "leftValue": "={{ $json.validation.isValid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "8c837892-1af3-4b63-9e7d-5ff9419d894e",
+      "name": "Input Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        128,
+        -272
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { status: 'error', userMessage: \"We couldn't understand some of the numbers you entered. Please check them and try again.\", validationErrors: $json.validation.errors } }}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "id": "4636f113-b5e7-498b-baa0-027f3fd51bf7",
+      "name": "Respond - Validation Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        384,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ================================================================\n// RESTRUCTRA — 04-06 Financial Engine, Scenarios, Diagnosis\n// ================================================================\n// n8n Code node\n//\n// HARD RULE:\n// This node is deterministic.\n// No LLM calculations happen here.\n//\n// Financial numbers are calculated only by this code.\n// ================================================================\n\nconst input = $input.first().json;\n\n\n// ================================================================\n// 1. HELPERS\n// ================================================================\n\nfunction round2(n) {\n  if (n === null || n === undefined) return null;\n  if (!Number.isFinite(Number(n))) return null;\n  return Math.round(Number(n) * 100) / 100;\n}\n\nfunction toNumberOrNull(v) {\n  if (\n    v === null ||\n    v === undefined ||\n    v === \"\" ||\n    v === \"I don't know\" ||\n    v === \"Not sure\"\n  ) {\n    return null;\n  }\n\n  const n =\n    typeof v === \"number\"\n      ? v\n      : Number(String(v).replace(/[₹,\\s]/g, \"\"));\n\n  return Number.isFinite(n) ? n : null;\n}\n\nfunction normalizeTenure(value, unit) {\n  const n = toNumberOrNull(value);\n\n  if (n === null) return null;\n\n  if (unit === \"years\") {\n    return Math.round(n * 12);\n  }\n\n  return Math.round(n);\n}\n\n\n// ================================================================\n// 2. NORMALIZE INPUT\n// ================================================================\n\nfunction normalizeInput(raw) {\n  const out = {\n    business: {\n      type: raw?.business?.type ?? null,\n      monthlySales: toNumberOrNull(\n        raw?.business?.monthlySales\n      ),\n      monthlyExpenses: toNumberOrNull(\n        raw?.business?.monthlyExpenses\n      ),\n      customersPayingLate:\n        raw?.business?.customersPayingLate ?? \"Not sure\",\n      receivablesAmount: toNumberOrNull(\n        raw?.business?.receivablesAmount\n      ),\n      incomeOutlook:\n        raw?.business?.incomeOutlook ?? \"Not sure\",\n      cashReserve: toNumberOrNull(\n        raw?.business?.cashReserve\n      ),\n    },\n\n    loans: Array.isArray(raw?.loans)\n      ? raw.loans.map((l, i) => ({\n          id: l?.id || `loan_${i + 1}`,\n          lender: l?.lender ?? null,\n          loanType: l?.loanType ?? \"Don't know\",\n          outstandingAmount: toNumberOrNull(\n            l?.outstandingAmount\n          ),\n          emi: toNumberOrNull(l?.emi),\n          remainingTenureMonths: normalizeTenure(\n            l?.remainingTenure,\n            l?.remainingTenureUnit\n          ),\n          interestRatePct: toNumberOrNull(\n            l?.interestRatePct\n          ),\n          secured: l?.secured ?? null,\n        }))\n      : [],\n\n    mainProblem:\n      raw?.mainProblem ?? \"I'm not sure\",\n\n    urgency:\n      raw?.urgency ?? \"I'm not sure\",\n\n    documents:\n      Array.isArray(raw?.documents)\n        ? raw.documents\n        : [],\n  };\n\n  return out;\n}\n\n\n// ================================================================\n// 3. VALIDATION\n// ================================================================\n\nfunction validateInput(data) {\n  const errors = [];\n  const warnings = [];\n\n  if (data.business.monthlySales === null) {\n    warnings.push({\n      field: \"monthlySales\",\n      message: \"Monthly sales not provided.\",\n    });\n  }\n\n  if (data.business.monthlyExpenses === null) {\n    warnings.push({\n      field: \"monthlyExpenses\",\n      message: \"Monthly expenses not provided.\",\n    });\n  }\n\n  if (\n    data.business.monthlySales !== null &&\n    data.business.monthlySales < 0\n  ) {\n    errors.push({\n      field: \"monthlySales\",\n      message: \"Monthly sales cannot be negative.\",\n    });\n  }\n\n  if (\n    data.business.monthlyExpenses !== null &&\n    data.business.monthlyExpenses < 0\n  ) {\n    errors.push({\n      field: \"monthlyExpenses\",\n      message: \"Monthly expenses cannot be negative.\",\n    });\n  }\n\n  if (\n    !Array.isArray(data.loans) ||\n    data.loans.length === 0\n  ) {\n    warnings.push({\n      field: \"loans\",\n      message: \"No loans provided.\",\n    });\n  } else {\n    data.loans.forEach((l) => {\n\n      if (l.emi === null) {\n        warnings.push({\n          field: `${l.id}.emi`,\n          message: `EMI missing for loan ${l.id}.`,\n        });\n      }\n\n      if (l.outstandingAmount === null) {\n        warnings.push({\n          field: `${l.id}.outstandingAmount`,\n          message: `Outstanding amount missing for loan ${l.id}.`,\n        });\n      }\n\n      if (l.emi !== null && l.emi < 0) {\n        errors.push({\n          field: `${l.id}.emi`,\n          message: \"EMI cannot be negative.\",\n        });\n      }\n\n      if (\n        l.outstandingAmount !== null &&\n        l.outstandingAmount < 0\n      ) {\n        errors.push({\n          field: `${l.id}.outstandingAmount`,\n          message: \"Outstanding amount cannot be negative.\",\n        });\n      }\n\n      if (\n        l.interestRatePct !== null &&\n        (\n          l.interestRatePct < 0 ||\n          l.interestRatePct > 60\n        )\n      ) {\n        errors.push({\n          field: `${l.id}.interestRatePct`,\n          message: \"Interest rate looks invalid.\",\n        });\n      }\n    });\n  }\n\n  return {\n    isValid: errors.length === 0,\n    errors,\n    warnings,\n  };\n}\n\n\n// ================================================================\n// 4. SUM LOANS\n// ================================================================\n\nfunction sumEMI(loans) {\n  const known = (loans || []).filter(\n    (l) => l.emi !== null\n  );\n\n  if (known.length === 0) return null;\n\n  return known.reduce(\n    (sum, l) => sum + l.emi,\n    0\n  );\n}\n\nfunction sumOutstanding(loans) {\n  const known = (loans || []).filter(\n    (l) => l.outstandingAmount !== null\n  );\n\n  if (known.length === 0) return null;\n\n  return known.reduce(\n    (sum, l) => sum + l.outstandingAmount,\n    0\n  );\n}\n\n\n// ================================================================\n// 5. RECONCILIATION\n// ================================================================\n\nfunction reconcile(userData, extractedDoc) {\n\n  const conflicts = [];\n  const confirmations = [];\n\n  if (\n    !extractedDoc ||\n    !Array.isArray(extractedDoc.fields)\n  ) {\n    return {\n      conflicts,\n      confirmations,\n      hasConflicts: false,\n    };\n  }\n\n  const TOLERANCE = 0.03;\n\n  const userLookup = {\n    monthlyEMI: sumEMI(userData.loans),\n    totalOutstanding: sumOutstanding(userData.loans),\n    monthlySales:\n      userData.business.monthlySales,\n  };\n\n  extractedDoc.fields.forEach((f) => {\n\n    if (!(f.field in userLookup)) return;\n\n    const userValue = userLookup[f.field];\n    const docValue = toNumberOrNull(f.value);\n\n    if (\n      userValue === null ||\n      docValue === null\n    ) {\n      return;\n    }\n\n    const diffRatio =\n      userValue === 0\n        ? (docValue === 0 ? 0 : 1)\n        : Math.abs(userValue - docValue) /\n          Math.abs(userValue);\n\n    const record = {\n      field: f.field,\n      userValue,\n      documentValue: docValue,\n      source: f.source,\n      confidence: f.confidence,\n      diffPct:\n        Math.round(diffRatio * 1000) / 10,\n    };\n\n    if (diffRatio > TOLERANCE) {\n\n      conflicts.push({\n        ...record,\n        status: \"CONFLICT\",\n        actionRequired: true,\n      });\n\n    } else {\n\n      confirmations.push({\n        ...record,\n        status: \"CONFIRMED\",\n        actionRequired: false,\n      });\n    }\n  });\n\n  return {\n    conflicts,\n    confirmations,\n    hasConflicts: conflicts.length > 0,\n  };\n}\n\n\n// ================================================================\n// 6. BUILD ALL RECONCILIATION RESULTS\n// ================================================================\n\nfunction buildReconciliationResults(data) {\n\n  const results = [];\n\n  for (const doc of data.documents || []) {\n\n    const result = reconcile(data, doc);\n\n    results.push({\n      documentType:\n        doc?.documentType ?? null,\n\n      fileName:\n        doc?.fileName ?? null,\n\n      conflicts:\n        result.conflicts || [],\n\n      confirmations:\n        result.confirmations || [],\n\n      hasConflicts:\n        result.hasConflicts || false,\n\n      extractionFailed:\n        !Array.isArray(doc?.fields),\n    });\n  }\n\n  return results;\n}\n\n\n// ================================================================\n// 7. FINANCIAL ENGINE\n// ================================================================\n\nfunction computeFinancials(data) {\n\n  const sales =\n    data.business.monthlySales;\n\n  const expenses =\n    data.business.monthlyExpenses;\n\n  const loans =\n    data.loans || [];\n\n  const totalMonthlyEMI =\n    sumEMI(loans);\n\n  const totalOutstandingDebt =\n    sumOutstanding(loans);\n\n  const missingEMICount =\n    loans.filter(\n      (l) => l.emi === null\n    ).length;\n\n  const availableAfterExpenses =\n    sales !== null &&\n    expenses !== null\n      ? round2(sales - expenses)\n      : null;\n\n  const availableAfterEMI =\n    availableAfterExpenses !== null &&\n    totalMonthlyEMI !== null\n      ? round2(\n          availableAfterExpenses -\n          totalMonthlyEMI\n        )\n      : null;\n\n  const internalDSCR =\n    availableAfterExpenses !== null &&\n    totalMonthlyEMI\n      ? round2(\n          availableAfterExpenses /\n          totalMonthlyEMI\n        )\n      : null;\n\n  const emiToSalesRatio =\n    sales &&\n    totalMonthlyEMI !== null\n      ? round2(\n          totalMonthlyEMI / sales\n        )\n      : null;\n\n  const emiToAvailableRatio =\n    availableAfterExpenses !== null &&\n    availableAfterExpenses > 0 &&\n    totalMonthlyEMI !== null\n      ? round2(\n          totalMonthlyEMI /\n          availableAfterExpenses\n        )\n      : null;\n\n\n  // --------------------------------------------------------------\n  // CASH RESERVE COVERAGE\n  // --------------------------------------------------------------\n  //\n  // This measures how many months of CURRENT EMI obligations\n  // the reported cash reserve could cover.\n  //\n  // It is NOT operating-expense runway.\n  // --------------------------------------------------------------\n\n  const cashReserve =\n    data.business.cashReserve;\n\n  const cashReserveCoverageMonths =\n    cashReserve !== null &&\n    totalMonthlyEMI > 0\n      ? round2(\n          cashReserve /\n          totalMonthlyEMI\n        )\n      : null;\n\n\n  const receivables =\n    data.business.receivablesAmount;\n\n  const receivablesRatio =\n    receivables !== null &&\n    sales\n      ? round2(\n          receivables / sales\n        )\n      : null;\n\n\n  // --------------------------------------------------------------\n  // DEBT CONCENTRATION\n  // --------------------------------------------------------------\n\n  let debtConcentration = \"UNKNOWN\";\n\n  const knownOutstanding =\n    loans.filter(\n      (l) =>\n        l.outstandingAmount !== null\n    );\n\n  if (loans.length === 1) {\n\n    debtConcentration =\n      \"SINGLE_LOAN\";\n\n  } else if (\n    knownOutstanding.length >= 2 &&\n    totalOutstandingDebt\n  ) {\n\n    const maxShare =\n      Math.max(\n        ...knownOutstanding.map(\n          (l) =>\n            l.outstandingAmount\n        )\n      ) / totalOutstandingDebt;\n\n    debtConcentration =\n      maxShare > 0.6\n        ? \"CONCENTRATED\"\n        : \"DISTRIBUTED\";\n  }\n\n\n  // --------------------------------------------------------------\n  // WEIGHTED AVERAGE INTEREST RATE\n  // --------------------------------------------------------------\n\n  const rated =\n    loans.filter(\n      (l) =>\n        l.interestRatePct !== null &&\n        l.outstandingAmount !== null\n    );\n\n  let weightedAvgInterestRate =\n    null;\n\n  let interestRateAssumed =\n    false;\n\n  if (rated.length > 0) {\n\n    const sumOut =\n      rated.reduce(\n        (sum, l) =>\n          sum + l.outstandingAmount,\n        0\n      );\n\n    weightedAvgInterestRate =\n      round2(\n        rated.reduce(\n          (sum, l) =>\n            sum +\n            l.outstandingAmount *\n            l.interestRatePct,\n          0\n        ) / sumOut\n      );\n\n  } else {\n\n    weightedAvgInterestRate = 14.0;\n    interestRateAssumed = true;\n  }\n\n\n  // --------------------------------------------------------------\n  // WEIGHTED AVERAGE REMAINING TENURE\n  // --------------------------------------------------------------\n\n  const tenured =\n    loans.filter(\n      (l) =>\n        l.remainingTenureMonths !== null &&\n        l.outstandingAmount !== null\n    );\n\n  let weightedAvgTenureMonths =\n    null;\n\n  let tenureAssumed =\n    false;\n\n  if (tenured.length > 0) {\n\n    const sumOut =\n      tenured.reduce(\n        (sum, l) =>\n          sum + l.outstandingAmount,\n        0\n      );\n\n    weightedAvgTenureMonths =\n      Math.round(\n        tenured.reduce(\n          (sum, l) =>\n            sum +\n            l.outstandingAmount *\n            l.remainingTenureMonths,\n          0\n        ) / sumOut\n      );\n\n  } else {\n\n    weightedAvgTenureMonths = 36;\n    tenureAssumed = true;\n  }\n\n\n  // --------------------------------------------------------------\n  // COMFORTABLE EMI RANGE\n  // --------------------------------------------------------------\n\n  let comfortableEMIRange =\n    null;\n\n  if (\n    availableAfterExpenses !== null &&\n    availableAfterExpenses > 0\n  ) {\n\n    comfortableEMIRange = {\n\n      lower:\n        round2(\n          availableAfterExpenses * 0.4\n        ),\n\n      upper:\n        round2(\n          availableAfterExpenses * 0.55\n        ),\n\n      basis:\n        \"Illustrative safety-cushion calculation: 40%-55% of estimated money left after business expenses. Not a lender-approved affordability limit.\",\n    };\n  }\n\n\n  return {\n\n    totalMonthlyEMI,\n\n    totalOutstandingDebt,\n\n    missingEMICount,\n\n    availableAfterExpenses,\n\n    availableAfterEMI,\n\n    internalDSCR,\n\n    emiToSalesRatio,\n\n    emiToAvailableRatio,\n\n    cashReserveCoverageMonths,\n\n    receivablesRatio,\n\n    debtConcentration,\n\n    weightedAvgInterestRate,\n\n    interestRateAssumed,\n\n    weightedAvgTenureMonths,\n\n    tenureAssumed,\n\n    comfortableEMIRange,\n  };\n}\n\n\n// ================================================================\n// 8. AMORTIZATION HELPERS\n// ================================================================\n\nfunction emiForLoan(\n  principal,\n  annualRatePct,\n  tenureMonths\n) {\n\n  if (\n    !principal ||\n    !tenureMonths\n  ) {\n    return null;\n  }\n\n  const r =\n    annualRatePct / 12 / 100;\n\n  if (r === 0) {\n\n    return round2(\n      principal /\n      tenureMonths\n    );\n  }\n\n  const factor =\n    Math.pow(\n      1 + r,\n      tenureMonths\n    );\n\n  return round2(\n    (\n      principal *\n      r *\n      factor\n    ) /\n    (factor - 1)\n  );\n}\n\nfunction totalRepayment(\n  emi,\n  months\n) {\n\n  if (\n    emi === null ||\n    !months\n  ) {\n    return null;\n  }\n\n  return round2(\n    emi * months\n  );\n}\n\n\n// ================================================================\n// 9. STRESS ASSUMPTIONS\n// ================================================================\n\nconst STRESS_ASSUMPTIONS = {\n\n  stressRevenueChangePct: -20,\n\n  recoveryRevenueChangePct: 15,\n\n  expensesHeldConstant: true,\n};\n\n\n// ================================================================\n// 10. REVENUE STRESS HELPER\n// ================================================================\n\nfunction availableUnderRevenueChange(\n  sales,\n  expenses,\n  changePct\n) {\n\n  if (\n    sales === null ||\n    expenses === null\n  ) {\n    return null;\n  }\n\n  const adjustedSales =\n    sales *\n    (1 + changePct / 100);\n\n  return round2(\n    adjustedSales -\n    expenses\n  );\n}\n\n\n// ================================================================\n// 11. SCENARIO ENGINE\n// ================================================================\n\nfunction buildScenarios(\n  data,\n  fin\n) {\n\n  const sales =\n    data.business.monthlySales;\n\n  const expenses =\n    data.business.monthlyExpenses;\n\n  const outstanding =\n    fin.totalOutstandingDebt;\n\n  const rate =\n    fin.weightedAvgInterestRate;\n\n  const tenure =\n    fin.weightedAvgTenureMonths;\n\n  const currentEMI =\n    fin.totalMonthlyEMI;\n\n\n  const availBase =\n    fin.availableAfterExpenses;\n\n  const availStress =\n    availableUnderRevenueChange(\n      sales,\n      expenses,\n      STRESS_ASSUMPTIONS\n        .stressRevenueChangePct\n    );\n\n  const availRecovery =\n    availableUnderRevenueChange(\n      sales,\n      expenses,\n      STRESS_ASSUMPTIONS\n        .recoveryRevenueChangePct\n    );\n\n\n  function testCase(emi) {\n\n    if (emi === null) {\n      return null;\n    }\n\n    return {\n\n      base:\n        availBase !== null\n          ? round2(\n              availBase - emi\n            )\n          : null,\n\n      stress:\n        availStress !== null\n          ? round2(\n              availStress - emi\n            )\n          : null,\n\n      recovery:\n        availRecovery !== null\n          ? round2(\n              availRecovery - emi\n            )\n          : null,\n    };\n  }\n\n\n  const scenarios = {};\n\n\n  // --------------------------------------------------------------\n  // CURRENT\n  // --------------------------------------------------------------\n\n  scenarios.current = {\n\n    label:\n      \"Current repayment (no change)\",\n\n    emi:\n      currentEMI,\n\n    tenureMonths:\n      tenure,\n\n    estimatedRemainingRepayment:\n      totalRepayment(\n        currentEMI,\n        tenure\n      ),\n\n    monthlySurplusDeficit:\n      testCase(currentEMI),\n\n    note:\n      \"Reflects the loan terms as currently reported.\",\n  };\n\n\n  // --------------------------------------------------------------\n  // LONGER REPAYMENT\n  // --------------------------------------------------------------\n\n  if (\n    outstanding &&\n    tenure &&\n    rate !== null\n  ) {\n\n    scenarios.longerRepayment = {};\n\n    [0.25, 0.5, 1.0]\n      .forEach((extPct) => {\n\n        const key =\n          `extend_${Math.round(\n            extPct * 100\n          )}pct`;\n\n        const newTenure =\n          Math.round(\n            tenure *\n            (1 + extPct)\n          );\n\n        const newEMI =\n          emiForLoan(\n            outstanding,\n            rate,\n            newTenure\n          );\n\n        const currentTotal =\n          totalRepayment(\n            currentEMI,\n            tenure\n          );\n\n        const newTotal =\n          totalRepayment(\n            newEMI,\n            newTenure\n          );\n\n        scenarios\n          .longerRepayment[key] = {\n\n            label:\n              `Extend remaining tenure by ${Math.round(\n                extPct * 100\n              )}%`,\n\n            newTenureMonths:\n              newTenure,\n\n            newEMI:\n              newEMI,\n\n            emiReduction:\n              currentEMI !== null &&\n              newEMI !== null\n                ? round2(\n                    currentEMI -\n                    newEMI\n                  )\n                : null,\n\n            estimatedAdditionalInterest:\n              newTotal !== null &&\n              currentTotal !== null\n                ? round2(\n                    newTotal -\n                    currentTotal\n                  )\n                : null,\n\n            monthlySurplusDeficit:\n              testCase(newEMI),\n\n            disclaimer:\n              \"Illustrative scenario only. Actual terms depend on lender approval.\",\n          };\n      });\n\n\n    scenarios\n      .longerRepayment\n      .default =\n      \"extend_50pct\";\n\n  } else {\n\n    scenarios.longerRepayment = {\n\n      unavailable: true,\n\n      reason:\n        \"Insufficient data (outstanding amount, tenure, or interest rate missing).\",\n    };\n  }\n\n\n  // --------------------------------------------------------------\n  // TEMPORARY RELIEF\n  // --------------------------------------------------------------\n\n  if (\n    outstanding &&\n    tenure &&\n    rate !== null\n  ) {\n\n    const reliefMonths = 3;\n\n    const monthlyRate =\n      rate / 12 / 100;\n\n    const accruedInterest =\n      round2(\n        outstanding *\n        monthlyRate *\n        reliefMonths\n      );\n\n    const newPrincipal =\n      round2(\n        outstanding +\n        accruedInterest\n      );\n\n    const postReliefTenure =\n      tenure;\n\n    const postReliefEMI =\n      emiForLoan(\n        newPrincipal,\n        rate,\n        postReliefTenure\n      );\n\n\n    scenarios.temporaryRelief = {\n\n      label:\n        \"3-month illustrative payment relief\",\n\n      reliefMonths:\n\n        reliefMonths,\n\n      paymentDuringRelief:\n        0,\n\n      assumedInterestTreatment:\n        \"Interest continues to accrue during relief and is added to outstanding principal.\",\n\n      accruedInterestDuringRelief:\n        accruedInterest,\n\n      postReliefEMI:\n        postReliefEMI,\n\n      postReliefTenureMonths:\n        postReliefTenure,\n\n      totalTimelineMonths:\n        postReliefTenure +\n        reliefMonths,\n\n      monthlySurplusDeficitDuringRelief:\n        testCase(0),\n\n      monthlySurplusDeficitAfterRelief:\n        testCase(postReliefEMI),\n\n      disclaimer:\n        \"Illustrative scenario only. The lender may or may not offer this exact structure.\",\n    };\n\n  } else {\n\n    scenarios.temporaryRelief = {\n\n      unavailable: true,\n\n      reason:\n        \"Insufficient data (outstanding amount, tenure, or interest rate missing).\",\n    };\n  }\n\n\n  // --------------------------------------------------------------\n  // STEP-DOWN\n  // --------------------------------------------------------------\n\n  if (\n    outstanding &&\n    tenure &&\n    rate !== null &&\n    currentEMI !== null\n  ) {\n\n    const stepMonths = 6;\n\n    const reducedEMI =\n      round2(\n        currentEMI * 0.6\n      );\n\n    const principalPaidInStep =\n      round2(\n        reducedEMI *\n        stepMonths\n      );\n\n    const monthlyRate =\n      rate / 12 / 100;\n\n    const interestDuringStep =\n      round2(\n        outstanding *\n        monthlyRate *\n        stepMonths\n      );\n\n    const remainingPrincipalAfterStep =\n      round2(\n        Math.max(\n          outstanding +\n          interestDuringStep -\n          principalPaidInStep,\n          0\n        )\n      );\n\n    const remainingTenureAfterStep =\n      Math.max(\n        tenure -\n        stepMonths,\n        1\n      );\n\n    const subsequentEMI =\n      emiForLoan(\n        remainingPrincipalAfterStep,\n        rate,\n        remainingTenureAfterStep\n      );\n\n\n    scenarios.stepDown = {\n\n      label:\n        \"Reduced EMI for 6 months, then step up\",\n\n      stepMonths:\n\n        stepMonths,\n\n      reducedEMI:\n        reducedEMI,\n\n      subsequentEMI:\n        subsequentEMI,\n\n      subsequentTenureMonths:\n        remainingTenureAfterStep,\n\n      totalTimelineMonths:\n        stepMonths +\n        remainingTenureAfterStep,\n\n      monthlySurplusDeficitDuringStep:\n        testCase(reducedEMI),\n\n      monthlySurplusDeficitAfterStep:\n        testCase(subsequentEMI),\n\n      simplification:\n        \"Principal/interest split during the step-down period is approximated, not a full amortization schedule.\",\n\n      disclaimer:\n        \"Illustrative scenario only. Actual terms depend on lender approval.\",\n    };\n\n  } else {\n\n    scenarios.stepDown = {\n\n      unavailable: true,\n\n      reason:\n        \"Insufficient data.\",\n    };\n  }\n\n\n  // --------------------------------------------------------------\n  // CONSOLIDATION\n  // --------------------------------------------------------------\n\n  const loans =\n    data.loans || [];\n\n  if (loans.length >= 2) {\n\n    const allHaveData =\n      loans.every(\n        (l) =>\n          l.outstandingAmount !== null &&\n          l.interestRatePct !== null &&\n          l.remainingTenureMonths !== null\n      );\n\n    if (allHaveData) {\n\n      const consolidatedTenure =\n        Math.max(\n          ...loans.map(\n            (l) =>\n              l.remainingTenureMonths\n          )\n        );\n\n      const consolidatedEMI =\n        emiForLoan(\n          outstanding,\n          rate,\n          consolidatedTenure\n        );\n\n      const emiReductionPct =\n        currentEMI\n          ? round2(\n              (\n                (\n                  currentEMI -\n                  consolidatedEMI\n                ) /\n                currentEMI\n              ) * 100\n            )\n          : null;\n\n      const meaningfullyBeneficial =\n        emiReductionPct !== null &&\n        emiReductionPct >= 15;\n\n\n      scenarios.consolidation = {\n\n        label:\n          \"Consolidate all loans into a single facility\",\n\n        consolidatedOutstanding:\n          outstanding,\n\n        consolidatedEMI:\n          consolidatedEMI,\n\n        consolidatedTenureMonths:\n          consolidatedTenure,\n\n        emiReduction:\n          currentEMI !== null\n            ? round2(\n                currentEMI -\n                consolidatedEMI\n              )\n            : null,\n\n        emiReductionPct:\n          emiReductionPct,\n\n        recommended:\n          meaningfullyBeneficial,\n\n        monthlySurplusDeficit:\n          testCase(\n            consolidatedEMI\n          ),\n\n        note:\n          meaningfullyBeneficial\n            ? \"Calculated reduction is meaningful (>=15%). Presented as an option, not an automatic recommendation.\"\n            : \"Calculated benefit is not large enough to recommend consolidation on its own.\",\n\n        disclaimer:\n          \"Illustrative scenario only. Actual consolidated terms depend on lender approval.\",\n      };\n\n    } else {\n\n      scenarios.consolidation = {\n\n        unavailable: true,\n\n        reason:\n          \"Consolidation cannot be reliably assessed from the available information (missing rate/tenure/outstanding on at least one loan).\",\n      };\n    }\n\n  } else {\n\n    scenarios.consolidation = {\n\n      notApplicable: true,\n\n      reason:\n        \"Only one loan reported.\",\n    };\n  }\n\n\n  return {\n\n    scenarios,\n\n    stressAssumptions:\n      STRESS_ASSUMPTIONS,\n  };\n}\n\n\n// ================================================================\n// 12. STRESS DIAGNOSIS\n// ================================================================\n\nfunction diagnoseStress(\n  data,\n  fin,\n  scenarioBundle\n) {\n\n  const classifications =\n    new Set();\n\n  const {\n    internalDSCR,\n    cashReserveCoverageMonths,\n    receivablesRatio,\n    emiToAvailableRatio,\n    weightedAvgInterestRate,\n    interestRateAssumed,\n  } = fin;\n\n  const loans =\n    data.loans || [];\n\n\n  const dscrKnown =\n    internalDSCR !== null;\n\n  const bufferKnown =\n    cashReserveCoverageMonths !== null;\n\n\n  // HEALTHY / WATCH\n\n  if (\n    dscrKnown &&\n    internalDSCR >= 1.6 &&\n    (\n      !bufferKnown ||\n      cashReserveCoverageMonths >= 2\n    ) &&\n    (\n      receivablesRatio === null ||\n      receivablesRatio < 0.3\n    )\n  ) {\n\n    classifications.add(\n      \"HEALTHY\"\n    );\n\n  } else if (\n    dscrKnown &&\n    internalDSCR >= 1.15\n  ) {\n\n    classifications.add(\n      \"WATCH\"\n    );\n  }\n\n\n  // HIGH EMI BURDEN\n\n  if (\n    emiToAvailableRatio !== null &&\n    emiToAvailableRatio > 0.6\n  ) {\n\n    classifications.add(\n      \"HIGH_EMI_BURDEN\"\n    );\n  }\n\n\n  // TEMPORARY LIQUIDITY STRESS\n\n  if (\n    receivablesRatio !== null &&\n    receivablesRatio > 0.35 &&\n    [\"Yes\", \"Sometimes\"].includes(\n      data.business.customersPayingLate\n    )\n  ) {\n\n    classifications.add(\n      \"TEMPORARY_LIQUIDITY_STRESS\"\n    );\n  }\n\n\n  // SEASONAL\n\n  if (\n    data.mainProblem ===\n    \"My business is seasonal\"\n  ) {\n\n    classifications.add(\n      \"SEASONAL_CASH_FLOW_STRESS\"\n    );\n  }\n\n\n  // HIGH INTEREST\n\n  if (\n    !interestRateAssumed &&\n    weightedAvgInterestRate !== null &&\n    weightedAvgInterestRate > 16\n  ) {\n\n    classifications.add(\n      \"HIGH_INTEREST_BURDEN\"\n    );\n  }\n\n\n  // MULTIPLE LOANS\n\n  if (\n    loans.length >= 3\n  ) {\n\n    classifications.add(\n      \"MULTIPLE_LOAN_COMPLEXITY\"\n    );\n  }\n\n\n  // SAFETY NET\n\n  if (\n    dscrKnown &&\n    internalDSCR < 1.0 &&\n    classifications.size === 0\n  ) {\n\n    classifications.add(\n      \"WATCH\"\n    );\n  }\n\n\n  // STRUCTURAL CASH FLOW CHECK\n\n  if (\n    scenarioBundle &&\n    scenarioBundle.scenarios\n  ) {\n\n    const s =\n      scenarioBundle.scenarios;\n\n    const candidateBaseValues =\n      [];\n\n\n    if (\n      s.current?.monthlySurplusDeficit?.base\n      !== undefined\n    ) {\n\n      candidateBaseValues.push(\n        s.current\n          .monthlySurplusDeficit\n          .base\n      );\n    }\n\n\n    if (\n      s.longerRepayment &&\n      !s.longerRepayment.unavailable\n    ) {\n\n      Object.values(\n        s.longerRepayment\n      ).forEach((v) => {\n\n        if (\n          v &&\n          typeof v === \"object\" &&\n          v.monthlySurplusDeficit\n        ) {\n\n          candidateBaseValues.push(\n            v.monthlySurplusDeficit.base\n          );\n        }\n      });\n    }\n\n\n    if (\n      s.temporaryRelief &&\n      !s.temporaryRelief.unavailable\n    ) {\n\n      candidateBaseValues.push(\n        s.temporaryRelief\n          .monthlySurplusDeficitAfterRelief\n          ?.base\n      );\n    }\n\n\n    if (\n      s.stepDown &&\n      !s.stepDown.unavailable\n    ) {\n\n      candidateBaseValues.push(\n        s.stepDown\n          .monthlySurplusDeficitAfterStep\n          ?.base\n      );\n    }\n\n\n    if (\n      s.consolidation &&\n      !s.consolidation.unavailable &&\n      !s.consolidation.notApplicable\n    ) {\n\n      candidateBaseValues.push(\n        s.consolidation\n          .monthlySurplusDeficit\n          ?.base\n      );\n    }\n\n\n    const validCandidates =\n      candidateBaseValues.filter(\n        (v) =>\n          v !== null &&\n          v !== undefined\n      );\n\n\n    if (\n      validCandidates.length > 0\n    ) {\n\n      const bestBase =\n        Math.max(\n          ...validCandidates\n        );\n\n      if (\n        bestBase < 0\n      ) {\n\n        classifications.add(\n          \"STRUCTURAL_CASH_FLOW_PROBLEM\"\n        );\n      }\n    }\n  }\n\n\n  if (\n    classifications.size === 0\n  ) {\n\n    classifications.add(\n      \"WATCH\"\n    );\n  }\n\n\n  return Array.from(\n    classifications\n  );\n}\n\n\n// ================================================================\n// 13. DATA CONFIDENCE\n// ================================================================\n\nfunction computeDataConfidence(\n  data,\n  validation,\n  reconciliationResults,\n  fin\n) {\n\n  let score = 100;\n\n\n  score -=\n    validation.warnings.length * 8;\n\n\n  const conflictCount =\n    (reconciliationResults || [])\n      .reduce(\n        (sum, r) =>\n          sum +\n          (\n            r.conflicts\n              ? r.conflicts.length\n              : 0\n          ),\n        0\n      );\n\n\n  score -=\n    conflictCount * 15;\n\n\n  if (\n    data.documents.length === 0\n  ) {\n\n    score -= 10;\n  }\n\n\n  if (\n    fin &&\n    fin.tenureAssumed\n  ) {\n\n    score -= 12;\n  }\n\n\n  if (\n    fin &&\n    fin.interestRateAssumed\n  ) {\n\n    score -= 12;\n  }\n\n\n  if (\n    fin &&\n    fin.missingEMICount > 0\n  ) {\n\n    score -=\n      fin.missingEMICount * 10;\n  }\n\n\n  // --------------------------------------------------------------\n  // IMPORTANT:\n  // Never report absolute 100% certainty.\n  // --------------------------------------------------------------\n\n  score =\n    Math.max(\n      0,\n      Math.min(\n        95,\n        score\n      )\n    );\n\n\n  let level =\n    \"HIGH\";\n\n\n  if (\n    score < 50\n  ) {\n\n    level =\n      \"LOW\";\n\n  } else if (\n    score < 80\n  ) {\n\n    level =\n      \"MEDIUM\";\n  }\n\n\n  return {\n\n    score,\n\n    level,\n\n    note:\n      \"Confidence reflects the completeness and consistency of the supplied information. It does not mean the financial analysis is guaranteed to be correct.\",\n  };\n}\n\n\n// ================================================================\n// 14. EXECUTION\n// ================================================================\n\n// The previous node should already provide normalized data.\n// If it does not, normalize the incoming object.\n\nconst data =\n  input?.data &&\n  input.data.business\n    ? input.data\n    : normalizeInput(input);\n\n\n// Validation\n\nconst validation =\n  input?.validation &&\n  typeof input.validation === \"object\"\n    ? input.validation\n    : validateInput(data);\n\n\n// Reconciliation\n\nconst reconciliationResults =\n  Array.isArray(\n    input?.reconciliationResults\n  )\n    ? input.reconciliationResults\n    : buildReconciliationResults(\n        data\n      );\n\n\n// Deterministic financials\n\nconst fin =\n  computeFinancials(\n    data\n  );\n\n\n// Deterministic scenarios\n\nconst scenarioBundle =\n  buildScenarios(\n    data,\n    fin\n  );\n\n\n// Deterministic diagnosis\n\nconst classifications =\n  diagnoseStress(\n    data,\n    fin,\n    scenarioBundle\n  );\n\n\n// Deterministic confidence\n\nconst dataConfidence =\n  computeDataConfidence(\n    data,\n    validation,\n    reconciliationResults,\n    fin\n  );\n\n\n// ================================================================\n// 15. OUTPUT\n// ================================================================\n\nreturn [\n  {\n    json: {\n\n      data,\n\n      validation,\n\n      reconciliationResults,\n\n      fin,\n\n      scenarioBundle,\n\n      classifications,\n\n      dataConfidence,\n\n    },\n  },\n];"
+      },
+      "id": "6003752a-8dd8-4803-99fd-4f044af69092",
+      "name": "04-06 Financial Engine, Scenarios, Diagnosis",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        384,
+        -272
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// n8n Code node — \"Build Recommendation Prompt\"\n// Produces the exact system+user prompt sent to the LLM. The LLM is never\n// given raw permission to invent numbers — every figure it may reference is\n// pre-computed and handed to it as the \"ENGINE_OUTPUT\" JSON block.\n\nconst input = $input.first().json;\nconst { data, fin, scenarioBundle, classifications, dataConfidence, reconciliationResults } = input;\n\nconst systemPrompt = `You are the explanation layer of RESTRUCTRA, a financial decision-support tool for Indian MSME owners.\nYou are NOT a lender, NOT a CA, and NOT authorized to guarantee any outcome.\n\nSTRICT RULES:\n1. You may only use numbers that appear in the ENGINE_OUTPUT JSON given to you. Copy numbers exactly as they appear. Never invent, round, truncate, approximate, or recalculate a figure.\n2. You must return EXACTLY ONE \"primaryRecommendation\" plus arrays \"alternativeOptions\" and \"notPreferredOptions\".\n3. Never make or imply a guarantee, assurance, promise, or certain lender approval. The word \"guarantee\" is allowed only inside the required disclaimer when explicitly stating that the output is NOT a guarantee.\n4. Every scenario you mention must be labelled as illustrative/an estimate, not a lender-confirmed offer.\n5. If STRUCTURAL_CASH_FLOW_PROBLEM is present in classifications, you must state clearly that restructuring alone may not solve the underlying issue, and suggest the owner also look at the operating business problem.\n6. If classifications is exactly [\"HEALTHY\"], your primaryRecommendation must be to continue monitoring — do not recommend restructuring.\n7. Write in simple, plain language a non-finance small-business owner can understand. Avoid jargon (no \"DSCR\", \"amortization\", etc. in the primary explanation — those may appear only inside a \"technicalDetails\" field).\n8. Return ONLY valid JSON matching the schema below. No markdown, no commentary, no code fences.\n\nOUTPUT SCHEMA:\n{\n  \"summaryForOwner\": \"string, 2-4 plain sentences\",\n  \"primaryRecommendation\": { \"title\": \"string\", \"explanation\": \"string\", \"supportingNumbers\": [\"string referencing ENGINE_OUTPUT values only\"] },\n  \"alternativeOptions\": [ { \"title\": \"string\", \"explanation\": \"string\" } ],\n  \"notPreferredOptions\": [ { \"title\": \"string\", \"reasonNotPreferred\": \"string\" } ],\n  \"risksAndTradeoffs\": [\"string\"],\n  \"technicalDetails\": { \"internalDSCR\": number|null, \"emiToAvailableRatio\": number|null, \"note\": \"string\" },\n  \"disclaimer\": \"string — must state this is an estimate, not a lender decision, approval, or guarantee\"\n}`;\n\nconst userPrompt = `ENGINE_OUTPUT (the only source of numbers you may use):\n${JSON.stringify({ business: data.business, loans: data.loans, mainProblem: data.mainProblem, urgency: data.urgency, fin, scenarios: scenarioBundle.scenarios, stressAssumptions: scenarioBundle.stressAssumptions, classifications, dataConfidence, reconciliationConflicts: reconciliationResults.flatMap(r => r.conflicts) }, null, 2)}\n\nUsing ONLY the numbers above, write the recommendation JSON described in the system prompt.`;\n\nreturn [{\n  json: {\n    ...input,\n    aiRequest: {\n      model: 'claude-sonnet-4-6',\n      max_tokens: 1500,\n      system: systemPrompt,\n      messages: [{ role: 'user', content: userPrompt }],\n    },\n  },\n}];\n"
+      },
+      "id": "b1b9b7e6-7e14-4a19-a9c1-f665e698d467",
+      "name": "Build Recommendation Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        640,
+        -272
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ================================================================\n// RESTRUCTRA — Validate & Parse Recommendation\n// ================================================================\n// n8n Code node\n//\n// Purpose:\n// 1. Read the LLM response from Groq or Gemini\n// 2. Parse the LLM JSON safely\n// 3. Validate its structure\n// 4. Verify financial figures against deterministic engine output\n// 5. Reject unsafe lender-approval claims\n// 6. Fail closed if anything cannot be verified\n//\n// HARD RULE:\n// The LLM can explain deterministic calculations.\n// The LLM cannot create, modify, or invent financial figures.\n// ================================================================\n\n\n// ================================================================\n// 1. READ LLM RESPONSE\n// ================================================================\n\nconst httpResponse = $input.first().json;\n\n\n// ================================================================\n// 2. RETRIEVE DETERMINISTIC CONTEXT\n// ================================================================\n//\n// This is intentionally retrieved from the earlier deterministic\n// node rather than relying on the HTTP Request node to carry all\n// upstream data forward.\n// ================================================================\n\nconst priorContext =\n  ($node[\"04-06 Financial Engine, Scenarios, Diagnosis\"] &&\n    $node[\"04-06 Financial Engine, Scenarios, Diagnosis\"].json) ||\n  {};\n\nconst {\n  data,\n  validation,\n  reconciliationResults,\n  fin,\n  scenarioBundle,\n  classifications,\n  dataConfidence,\n} = priorContext;\n\n\n// ================================================================\n// 3. EXTRACT TEXT FROM LLM RESPONSE\n// ================================================================\n//\n// Supports:\n//\n// GROQ:\n// choices[0].message.content\n//\n// GEMINI:\n// candidates[0].content.parts[0].text\n//\n// Also supports n8n wrapped responses.\n// ================================================================\n\nfunction extractText(response) {\n  try {\n\n    // ------------------------------------------------------------\n    // GROQ / OPENAI-COMPATIBLE RESPONSE\n    // ------------------------------------------------------------\n\n    const groqContent =\n      response?.choices?.[0]?.message?.content;\n\n    if (typeof groqContent === \"string\") {\n      return groqContent;\n    }\n\n    // ------------------------------------------------------------\n    // GEMINI RESPONSE\n    // ------------------------------------------------------------\n\n    const geminiParts =\n      response?.candidates?.[0]?.content?.parts;\n\n    if (Array.isArray(geminiParts)) {\n\n      const textPart = geminiParts.find(\n        (p) => typeof p?.text === \"string\"\n      );\n\n      if (textPart) {\n        return textPart.text;\n      }\n    }\n\n    // ------------------------------------------------------------\n    // N8N WRAPPED GROQ RESPONSE\n    // ------------------------------------------------------------\n\n    const wrappedGroqContent =\n      response?.body?.choices?.[0]?.message?.content;\n\n    if (typeof wrappedGroqContent === \"string\") {\n      return wrappedGroqContent;\n    }\n\n    // ------------------------------------------------------------\n    // N8N WRAPPED GEMINI RESPONSE\n    // ------------------------------------------------------------\n\n    const wrappedGeminiParts =\n      response?.body?.candidates?.[0]?.content?.parts;\n\n    if (Array.isArray(wrappedGeminiParts)) {\n\n      const textPart = wrappedGeminiParts.find(\n        (p) => typeof p?.text === \"string\"\n      );\n\n      if (textPart) {\n        return textPart.text;\n      }\n    }\n\n    return null;\n\n  } catch (error) {\n\n    return null;\n  }\n}\n\n\n// ================================================================\n// 4. SAFE JSON PARSER\n// ================================================================\n\nfunction safeParseJSON(text) {\n\n  if (!text || typeof text !== \"string\") {\n    return null;\n  }\n\n  let cleaned = text.trim();\n\n  // Remove Markdown code fences if the model ignored JSON mode.\n  cleaned = cleaned\n    .replace(/^```json\\s*/i, \"\")\n    .replace(/^```\\s*/i, \"\")\n    .replace(/\\s*```$/i, \"\")\n    .trim();\n\n  // First attempt: direct JSON parse.\n  try {\n    return JSON.parse(cleaned);\n  } catch (error) {\n    // Continue to recovery attempt.\n  }\n\n  // ------------------------------------------------------------\n  // Recovery:\n  // Sometimes a model may put a small amount of text around the\n  // JSON object. Try extracting the outermost JSON object.\n  // ------------------------------------------------------------\n\n  const firstBrace = cleaned.indexOf(\"{\");\n  const lastBrace = cleaned.lastIndexOf(\"}\");\n\n  if (\n    firstBrace !== -1 &&\n    lastBrace !== -1 &&\n    lastBrace > firstBrace\n  ) {\n\n    const possibleJSON =\n      cleaned.slice(firstBrace, lastBrace + 1);\n\n    try {\n      return JSON.parse(possibleJSON);\n    } catch (error) {\n      return null;\n    }\n  }\n\n  return null;\n}\n\n\n// ================================================================\n// 5. COLLECT ALL DETERMINISTIC NUMBERS\n// ================================================================\n//\n// Every numeric value generated by the deterministic engine is\n// collected recursively.\n//\n// This allows us to verify figures mentioned by the LLM anywhere\n// inside its recommendation.\n// ================================================================\n\nfunction collectEngineNumbers(\n  value,\n  numbers = new Set()\n) {\n\n  if (\n    value === null ||\n    value === undefined\n  ) {\n    return numbers;\n  }\n\n  if (\n    typeof value === \"number\" &&\n    Number.isFinite(value)\n  ) {\n\n    numbers.add(String(value));\n\n    return numbers;\n  }\n\n  if (Array.isArray(value)) {\n\n    for (const item of value) {\n      collectEngineNumbers(item, numbers);\n    }\n\n    return numbers;\n  }\n\n  if (typeof value === \"object\") {\n\n    for (const item of Object.values(value)) {\n      collectEngineNumbers(item, numbers);\n    }\n  }\n\n  return numbers;\n}\n\n\n// ================================================================\n// 6. NORMALIZE NUMBERS\n// ================================================================\n\nfunction normalizeNumber(value) {\n\n  if (\n    value === null ||\n    value === undefined\n  ) {\n    return null;\n  }\n\n  let stringValue = String(value)\n    .replace(/[₹$€£]/g, \"\")\n    .replace(/,/g, \"\")\n    .trim();\n\n  // Remove percentage sign.\n  stringValue =\n    stringValue.replace(/%$/, \"\");\n\n  const numberValue =\n    Number(stringValue);\n\n  return Number.isFinite(numberValue)\n    ? numberValue\n    : null;\n}\n\n\n// ================================================================\n// 7. EXTRACT NUMBERS FROM AI TEXT\n// ================================================================\n//\n// Only figures >= 100 are checked.\n//\n// This avoids treating normal words such as:\n// \"3-month\",\n// \"6-month\",\n// \"50%\",\n// etc.\n// as financial figures that need exact reconciliation.\n//\n// Financial figures such as:\n// 121855.45\n// 198144.55\n// 1522272.5\n// 2.31\n// etc.\n// are captured where appropriate.\n// ================================================================\n\nfunction extractNumbersFromText(text) {\n\n  if (\n    !text ||\n    typeof text !== \"string\"\n  ) {\n    return [];\n  }\n\n  const regex =\n    /(?:₹|\\$|€|£)?-?\\d[\\d,]*(?:\\.\\d+)?%?/g;\n\n  const matches =\n    text.match(regex) || [];\n\n  return matches\n    .map(normalizeNumber)\n    .filter(\n      (numberValue) =>\n        numberValue !== null\n    )\n    .filter(\n      (numberValue) =>\n        Math.abs(numberValue) >= 100\n    );\n}\n\n\n// ================================================================\n// 8. CHECK NUMBER AGAINST ENGINE\n// ================================================================\n\nfunction numberMatchesEngine(\n  aiNumber,\n  engineNumbers\n) {\n\n  for (const engineNumber of engineNumbers) {\n\n    const deterministicNumber =\n      Number(engineNumber);\n\n    if (\n      !Number.isFinite(\n        deterministicNumber\n      )\n    ) {\n      continue;\n    }\n\n    // Exact match.\n    if (\n      aiNumber === deterministicNumber\n    ) {\n      return true;\n    }\n\n    // Same absolute magnitude.\n    //\n    // This allows the AI to describe a reduction as a positive\n    // figure even when the engine stores a signed delta.\n    if (\n      Math.abs(aiNumber) ===\n      Math.abs(deterministicNumber)\n    ) {\n      return true;\n    }\n\n    // Small floating-point tolerance.\n    if (\n      Math.abs(\n        Math.abs(aiNumber) -\n        Math.abs(deterministicNumber)\n      ) < 0.01\n    ) {\n      return true;\n    }\n  }\n\n  return false;\n}\n\n\n// ================================================================\n// 9. REQUIRED RECOMMENDATION STRUCTURE\n// ================================================================\n\nconst REQUIRED_FIELDS = [\n  \"summaryForOwner\",\n  \"primaryRecommendation\",\n  \"alternativeOptions\",\n  \"notPreferredOptions\",\n  \"risksAndTradeoffs\",\n  \"technicalDetails\",\n  \"disclaimer\",\n];\n\n\n// ================================================================\n// 10. VALIDATE RECOMMENDATION\n// ================================================================\n\nfunction validateRecommendation(\n  recommendationObject,\n  engineContext,\n  deterministicFin\n) {\n\n  const errors = [];\n\n  // ------------------------------------------------------------\n  // Basic object validation\n  // ------------------------------------------------------------\n\n  if (\n    !recommendationObject ||\n    typeof recommendationObject !== \"object\" ||\n    Array.isArray(recommendationObject)\n  ) {\n\n    return {\n      valid: false,\n      errors: [\n        \"Recommendation is not a valid JSON object.\"\n      ],\n    };\n  }\n\n\n  // ------------------------------------------------------------\n  // Required fields\n  // ------------------------------------------------------------\n\n  for (const field of REQUIRED_FIELDS) {\n\n    if (\n      !(field in recommendationObject)\n    ) {\n\n      errors.push(\n        `Missing recommendation field: ${field}.`\n      );\n    }\n  }\n\n\n  // ------------------------------------------------------------\n  // Primary recommendation\n  // ------------------------------------------------------------\n\n  if (\n    recommendationObject.primaryRecommendation !==\n    undefined\n  ) {\n\n    if (\n      typeof recommendationObject.primaryRecommendation !==\n      \"object\" ||\n      Array.isArray(\n        recommendationObject.primaryRecommendation\n      )\n    ) {\n\n      errors.push(\n        \"primaryRecommendation must be an object.\"\n      );\n\n    } else {\n\n      if (\n        typeof recommendationObject\n          .primaryRecommendation\n          .title !== \"string\"\n      ) {\n\n        errors.push(\n          \"primaryRecommendation.title must be a string.\"\n        );\n      }\n\n      if (\n        typeof recommendationObject\n          .primaryRecommendation\n          .explanation !== \"string\"\n      ) {\n\n        errors.push(\n          \"primaryRecommendation.explanation must be a string.\"\n        );\n      }\n\n      if (\n        \"supportingNumbers\" in\n        recommendationObject.primaryRecommendation &&\n        !Array.isArray(\n          recommendationObject\n            .primaryRecommendation\n            .supportingNumbers\n        )\n      ) {\n\n        errors.push(\n          \"primaryRecommendation.supportingNumbers must be an array.\"\n        );\n      }\n    }\n  }\n\n\n  // ------------------------------------------------------------\n  // Array fields\n  // ------------------------------------------------------------\n\n  const arrayFields = [\n    \"alternativeOptions\",\n    \"notPreferredOptions\",\n    \"risksAndTradeoffs\",\n  ];\n\n  for (const field of arrayFields) {\n\n    if (\n      field in recommendationObject &&\n      !Array.isArray(\n        recommendationObject[field]\n      )\n    ) {\n\n      errors.push(\n        `${field} must be an array.`\n      );\n    }\n  }\n\n\n  // ------------------------------------------------------------\n  // Technical details\n  // ------------------------------------------------------------\n\n  if (\n    recommendationObject.technicalDetails !==\n    undefined\n  ) {\n\n    if (\n      typeof recommendationObject.technicalDetails !==\n        \"object\" ||\n      Array.isArray(\n        recommendationObject.technicalDetails\n      )\n    ) {\n\n      errors.push(\n        \"technicalDetails must be an object.\"\n      );\n    }\n  }\n\n\n  // ============================================================\n  // UNSAFE CERTAINTY CHECK\n  // ============================================================\n  //\n  // We do NOT reject the word \"guarantee\" globally because the\n  // disclaimer itself may correctly say \"not a guarantee\".\n  //\n  // We only reject statements that imply approval or success is\n  // certain.\n  // ============================================================\n\n  const allText =\n    JSON.stringify(\n      recommendationObject\n    ).toLowerCase();\n\n  const unsafePatterns = [\n\n    \"guaranteed approval\",\n\n    \"guaranteed to be approved\",\n\n    \"will be approved\",\n\n    \"approval is guaranteed\",\n\n    \"approval is assured\",\n\n    \"assured approval\",\n\n    \"we guarantee approval\",\n\n    \"i guarantee approval\",\n\n    \"promise approval\",\n\n    \"will definitely approve\",\n\n    \"lender will approve\",\n\n    \"bank will approve\",\n\n    \"guaranteed acceptance\",\n\n    \"will definitely accept\",\n\n    \"certain to be approved\",\n\n    \"certain approval\",\n\n    \"approval is certain\",\n\n    \"guarantees approval\",\n\n  ];\n\n  for (\n    const phrase of unsafePatterns\n  ) {\n\n    if (\n      allText.includes(phrase)\n    ) {\n\n      errors.push(\n        `Recommendation contains an unsafe certainty phrase: \"${phrase}\".`\n      );\n    }\n  }\n\n\n  // ============================================================\n  // FINANCIAL NUMBER TRACEABILITY\n  // ============================================================\n\n  const engineNumbers =\n    collectEngineNumbers(\n      engineContext\n    );\n\n  const recommendationText =\n    JSON.stringify(\n      recommendationObject\n    );\n\n  const citedNumbers =\n    extractNumbersFromText(\n      recommendationText\n    );\n\n  const unverifiableNumbers =\n    citedNumbers.filter(\n      (numberValue) =>\n        !numberMatchesEngine(\n          numberValue,\n          engineNumbers\n        )\n    );\n\n  if (\n    unverifiableNumbers.length > 0\n  ) {\n\n    const uniqueNumbers = [\n      ...new Set(\n        unverifiableNumbers.map(\n          (numberValue) =>\n            String(numberValue)\n        )\n      ),\n    ];\n\n    errors.push(\n      \"Recommendation cites financial figures not found in deterministic engine output: \" +\n      uniqueNumbers\n        .slice(0, 15)\n        .join(\", \")\n    );\n  }\n\n\n  // ============================================================\n  // DETERMINISTIC ENGINE AVAILABILITY\n  // ============================================================\n\n  if (\n    !deterministicFin ||\n    typeof deterministicFin !== \"object\" ||\n    Object.keys(\n      deterministicFin\n    ).length === 0\n  ) {\n\n    errors.push(\n      \"Deterministic financial engine context unavailable — recommendation cannot be safely verified.\"\n    );\n  }\n\n\n  // ============================================================\n  // FINAL VALIDATION RESULT\n  // ============================================================\n\n  return {\n    valid:\n      errors.length === 0,\n\n    errors,\n  };\n}\n\n\n// ================================================================\n// 11. FAIL-CLOSED FALLBACK\n// ================================================================\n//\n// If Groq fails, returns invalid JSON, hallucinates figures, or\n// makes unsafe claims, we do NOT use the AI response.\n//\n// The deterministic engine remains available.\n// ================================================================\n\nfunction buildFailClosedRecommendation(\n  deterministicFin\n) {\n\n  return {\n\n    aiUnavailable: true,\n\n    summaryForOwner:\n      \"We were not able to generate a fully verified explanation this time, but the deterministic financial analysis is still available.\",\n\n    primaryRecommendation: {\n\n      title:\n        \"Review the figures below with a financial advisor or your lender.\",\n\n      explanation:\n        \"The automated recommendation could not be safely verified. The underlying financial calculations remain available for discussion with your lender or a Chartered Accountant.\",\n\n      supportingNumbers: [],\n    },\n\n    alternativeOptions: [],\n\n    notPreferredOptions: [],\n\n    risksAndTradeoffs: [\n\n      \"This is a fallback summary because the AI recommendation could not be safely verified.\",\n\n      \"Review the detailed financial analysis before making restructuring decisions.\",\n\n    ],\n\n    technicalDetails: {\n\n      internalDSCR:\n        deterministicFin?.internalDSCR ??\n        null,\n\n      emiToAvailableRatio:\n        deterministicFin?.emiToAvailableRatio ??\n        null,\n\n      note:\n        \"Fallback path — AI explanation failed validation or the deterministic engine context was unavailable.\",\n    },\n\n    disclaimer:\n      \"This is an estimate based on the information provided. It is not a loan approval, lender decision, financial offer, or financial guarantee.\",\n  };\n}\n\n\n// ================================================================\n// 12. EXTRACT + PARSE AI RESPONSE\n// ================================================================\n\nconst responseText =\n  extractText(\n    httpResponse\n  );\n\nconst parsedRecommendation =\n  safeParseJSON(\n    responseText\n  );\n\n\n// ================================================================\n// 13. VALIDATE\n// ================================================================\n\nconst validationResult =\n  validateRecommendation(\n    parsedRecommendation,\n    priorContext,\n    fin\n  );\n\n\n// ================================================================\n// 14. FAIL CLOSED IF INVALID\n// ================================================================\n\nconst recommendation =\n  validationResult.valid\n    ? parsedRecommendation\n    : buildFailClosedRecommendation(\n        fin\n      );\n\n\n// ================================================================\n// 15. FINAL OUTPUT\n// ================================================================\n\nreturn [\n  {\n    json: {\n\n      // ----------------------------------------------------------\n      // Original deterministic context\n      // ----------------------------------------------------------\n\n      data,\n\n      validation,\n\n      reconciliationResults,\n\n      fin,\n\n      scenarioBundle,\n\n      classifications,\n\n      dataConfidence,\n\n\n      // ----------------------------------------------------------\n      // Recommendation\n      // ----------------------------------------------------------\n\n      recommendation,\n\n\n      // ----------------------------------------------------------\n      // Validation metadata\n      // ----------------------------------------------------------\n\n      recommendationValidation:\n        validationResult,\n    },\n  },\n];"
+      },
+      "id": "79fdfd7a-f092-4d45-b0e7-e5a53871ce90",
+      "name": "Validate & Parse Recommendation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1168,
+        -272
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ================================================================\n// RESTRUCTRA — BUILD BANK REPORT PROMPT\n// ================================================================\n// n8n Code node\n//\n// PURPOSE:\n// - Collect deterministic financial data\n// - Collect scenarios\n// - Collect validated AI recommendation\n// - Build a tightly controlled prompt for the bank-ready report\n// - Prevent unsupported claims\n// - Never calculate financial numbers in the LLM\n//\n// OUTPUT:\n// {\n//   systemPrompt,\n//   prompt,\n//   userPrompt\n// }\n//\n// The next node \"LLM Bank Report\" consumes these fields.\n// ================================================================\n\n\n// ================================================================\n// 1. GET DETERMINISTIC CONTEXT\n// ================================================================\n\nconst input =\n  $input.first().json || {};\n\n\n// Financial engine node\nconst engine =\n  ($node[\"04-06 Financial Engine, Scenarios, Diagnosis\"] &&\n    $node[\"04-06 Financial Engine, Scenarios, Diagnosis\"].json)\n  || {};\n\n\n// Validated recommendation node\nconst recommendationNode =\n  ($node[\"Validate & Parse Recommendation\"] &&\n    $node[\"Validate & Parse Recommendation\"].json)\n  || {};\n\n\n// ================================================================\n// 2. EXTRACT CONTEXT\n// ================================================================\n\nconst data =\n  engine.data\n  || input.data\n  || {};\n\nconst fin =\n  engine.fin\n  || engine.financialEngine\n  || input.fin\n  || {};\n\nconst scenarioBundle =\n  engine.scenarioBundle\n  || input.scenarioBundle\n  || {};\n\nconst classifications =\n  engine.classifications\n  || input.classifications\n  || [];\n\nconst dataConfidence =\n  engine.dataConfidence\n  || input.dataConfidence\n  || {};\n\nconst reconciliationResults =\n  engine.reconciliationResults\n  || input.reconciliationResults\n  || [];\n\nconst recommendation =\n  recommendationNode.recommendation\n  || input.recommendation\n  || {};\n\nconst recommendationValidation =\n  recommendationNode.recommendationValidation\n  || {};\n\n\n// ================================================================\n// 3. BUILD RECONCILIATION SUMMARY\n// ================================================================\n\nconst reconciliationConflicts =\n  Array.isArray(reconciliationResults)\n    ? reconciliationResults.flatMap(\n        r => Array.isArray(r?.conflicts)\n          ? r.conflicts\n          : []\n      )\n    : [];\n\n\n// ================================================================\n// 4. SYSTEM PROMPT\n// ================================================================\n\nconst systemPrompt = `\nYou are RESTRUCTRA, an AI-based financial restructuring decision-support assistant for Indian MSME owners.\n\nYour task is to create a BANK-READY RESTRUCTURING DISCUSSION PLAN.\n\nYou are an explanation and documentation layer.\n\nYou are NOT:\n- a lender\n- a loan approval engine\n- a credit underwriter\n- a Chartered Accountant\n- a financial guarantee provider\n\nYou must never imply that a lender has approved, offered, sanctioned, accepted, or committed to any restructuring option.\n\nReturn ONLY valid JSON.\n\nDo not use Markdown.\nDo not use code fences.\nDo not add commentary outside the JSON object.\n\n============================================================\nSOURCE-OF-TRUTH RULE\n============================================================\n\nThe deterministic financial engine is the ONLY source of truth for financial calculations.\n\nUse ONLY information contained in the supplied context.\n\nNever invent or calculate:\n- revenue\n- expenses\n- EMI\n- outstanding debt\n- interest\n- tenure\n- surplus\n- deficit\n- DSCR\n- ratios\n- receivables\n- cash reserve\n- future cash flow\n- collection dates\n- collection probabilities\n- lender decisions\n- collateral values\n- credit history\n- missed-payment history\n- default status\n- customer commitments\n- deadlines\n\nDo not perform new financial calculations.\n\nCopy deterministic financial values exactly.\n\n============================================================\nCUSTOMER PAYMENT LANGUAGE\n============================================================\n\nIf the source says customers are \"paying late\", you MUST NOT rewrite this as:\n\n- customers have not paid\n- customers are overdue\n- overdue customers\n- overdue invoices\n- customers will pay\n- customers are expected to pay\n- collections will recover\n- receivables will be collected\n- expected collection\n- expected recovery\n\nUse this wording instead:\n\n\"Reported receivables total ₹X, and customers are reported as paying late.\"\n\nOnly use \"overdue\" if the supplied source explicitly uses the word \"overdue\".\n\n============================================================\nEXPENSE LANGUAGE\n============================================================\n\nDo NOT describe monthly expenses as:\n\n\"fixed expenses\"\n\nunless the supplied source explicitly classifies them as fixed.\n\nUse:\n\n\"reported monthly expenses\"\n\nor\n\n\"monthly business expenses\".\n\n============================================================\nCASH RESERVE LANGUAGE\n============================================================\n\nDo not describe cash reserve as:\n\n- operating runway\n- operating buffer\n- months of operating expenses\n- guaranteed liquidity\n- expense runway\n\nThe deterministic cash reserve coverage metric represents coverage of CURRENT EMI obligations only.\n\n============================================================\nEMI LANGUAGE\n============================================================\n\nNever describe an EMI as:\n\n- comfortable\n- affordable\n- manageable\n- safe\n\nmerely because it is lower than the current EMI.\n\nThe \"comfortable EMI range\" is only an illustrative safety-cushion calculation.\n\nIt is NOT:\n- a lender affordability threshold\n- an approval threshold\n- a credit limit\n- a guarantee\n\n============================================================\nRESTRUCTURING LANGUAGE\n============================================================\n\nAll scenarios are ILLUSTRATIVE.\n\nUse language such as:\n\n\"illustrative scenario\"\n\"option to discuss with the lender\"\n\"may consider\"\n\"could discuss\"\n\"subject to lender approval\"\n\"actual terms may differ\"\n\nNever say:\n\n\"approved restructuring\"\n\"approved offer\"\n\"sanctioned restructuring\"\n\"lender offer\"\n\"guaranteed restructuring\"\n\"guaranteed approval\"\n\"lender will approve\"\n\"bank will approve\"\n\n============================================================\nSTRESS TEST RULE\n============================================================\n\nThe stress scenario represents a deterministic downside illustration.\n\nIf the stress scenario remains negative after restructuring, explicitly state:\n\n\"The restructuring improves base-case cash-flow headroom but does not eliminate downside risk.\"\n\nNever say that restructuring:\n\n- eliminates downside risk\n- protects against revenue decline\n- prevents default\n- guarantees repayment\n- guarantees stability\n- solves the liquidity problem\n\n============================================================\nRECOMMENDATION RULE\n============================================================\n\nUse the VALIDATED RECOMMENDATION as the primary recommendation.\n\nDo not create a different primary recommendation.\n\nExplain:\n\n1. What the option changes.\n2. The new EMI if supplied.\n3. The change in monthly cash-flow headroom.\n4. The main tradeoff.\n5. The fact that lender approval is required.\n\n============================================================\nURGENT / TIMELINE RULE\n============================================================\n\nNever invent a deadline.\n\nIf urgency says:\n\n\"next 1–3 months\"\n\ndo not convert it into:\n\n\"within two weeks\"\n\"within 14 days\"\n\"by next Friday\"\nor any other invented deadline.\n\nUse:\n\n\"Discuss the preferred option with lenders soon, given the stated 1–3 month urgency.\"\n\n============================================================\nDOCUMENT RULE\n============================================================\n\nOnly call a document \"supplied\" or \"already provided\" if it exists in the supplied documents array.\n\nIf it is not supplied, call it:\n\n\"additional document to consider.\"\n\n============================================================\nRISK RULE\n============================================================\n\nThe report must clearly distinguish:\n\nBASE CASE\n\nfrom\n\nDOWNSIDE STRESS\n\nA positive base-case surplus does not mean the business is protected from downside revenue stress.\n\n============================================================\nOUTPUT STRUCTURE\n============================================================\n\nReturn exactly this JSON structure:\n\n{\n  \"title\": \"string\",\n\n  \"businessSituation\": [\n    \"string\"\n  ],\n\n  \"currentRepaymentSituation\": [\n    \"string\"\n  ],\n\n  \"mainReasonForPressure\": [\n    \"string\"\n  ],\n\n  \"estimatedComfortableRepaymentRange\": [\n    \"string\"\n  ],\n\n  \"recommendedOption\": [\n    \"string\"\n  ],\n\n  \"alternativeOptions\": [\n    \"string\"\n  ],\n\n  \"whyRecommendationMakesSense\": [\n    \"string\"\n  ],\n\n  \"risksAndTradeoffs\": [\n    \"string\"\n  ],\n\n  \"evidenceSupportingRequest\": [\n    \"string\"\n  ],\n\n  \"documentsToTakeToLender\": [\n    \"string\"\n  ],\n\n  \"questionsLenderMayAsk\": [\n    \"string\"\n  ],\n\n  \"suggestedEvidenceBasedResponses\": [\n    \"string\"\n  ],\n\n  \"nextSteps\": [\n    \"string\"\n  ],\n\n  \"disclaimer\": \"string\"\n}\n\n============================================================\nBUSINESS SITUATION\n============================================================\n\nDescribe only the supplied business facts.\n\nMention relevant items such as:\n\n- business type\n- monthly sales\n- monthly expenses\n- reported cash reserve\n- reported receivables\n- customer payment timing\n- income outlook\n\nDo not infer facts that were not supplied.\n\n============================================================\nCURRENT REPAYMENT SITUATION\n============================================================\n\nUse deterministic engine values for:\n\n- total monthly EMI\n- total outstanding debt\n- available after expenses\n- available after EMI\n- internal DSCR where appropriate\n- number of loans\n- weighted interest rate\n- weighted tenure\n\nTechnical ratios may be explained in simple language.\n\n============================================================\nMAIN REASON FOR PRESSURE\n============================================================\n\nUse the supplied main problem and deterministic classifications.\n\nFor example, if customers are reported as paying late and receivables are supplied, explain that the business may be experiencing liquidity pressure linked to delayed customer payments.\n\nDo not claim that customers have failed to pay unless explicitly supplied.\n\n============================================================\nCOMFORTABLE EMI RANGE\n============================================================\n\nIf available, report:\n\n- illustrative lower range\n- illustrative upper range\n\nand explicitly state:\n\n\"This is an illustrative safety-cushion calculation and not a lender-approved affordability limit.\"\n\nDo not claim that the recommended EMI is inside this range unless the deterministic values prove that it is.\n\n============================================================\nRECOMMENDED OPTION\n============================================================\n\nUse ONLY the validated recommendation.\n\nFor this case, if the validated recommendation is:\n\n\"Extend loan tenure by 50%\"\n\ndo not replace it with another option.\n\nUse the deterministic scenario corresponding to that recommendation.\n\n============================================================\nALTERNATIVE OPTIONS\n============================================================\n\nUse scenarios from the deterministic scenario bundle.\n\nClearly label them as illustrative.\n\nInclude meaningful tradeoffs where supplied.\n\n============================================================\nWHY THE RECOMMENDATION MAKES SENSE\n============================================================\n\nExplain the improvement using deterministic numbers only.\n\nFor example:\n\n\"The illustrative 50% tenure-extension scenario reduces monthly EMI from the current reported EMI to the scenario EMI, increasing base-case monthly cash-flow headroom.\"\n\nDo not say the restructuring guarantees stability.\n\n============================================================\nRISKS AND TRADEOFFS\n============================================================\n\nDiscuss only deterministic tradeoffs.\n\nExamples:\n\n- longer repayment duration\n- additional estimated interest\n- higher post-relief EMI\n- negative stress-case surplus\n- lender approval uncertainty\n- actual terms may differ\n\n============================================================\nEVIDENCE SUPPORTING REQUEST\n============================================================\n\nUse supplied financial evidence.\n\nDo not invent supporting evidence.\n\nPossible evidence includes:\n\n- reported monthly sales\n- reported monthly expenses\n- reported receivables\n- customer payment delays\n- current EMI burden\n- current cash reserve\n- deterministic scenario improvement\n- supplied loan statements\n- supplied bank statements\n\n============================================================\nDOCUMENTS\n============================================================\n\nSeparate:\n\nALREADY SUPPLIED\n\nfrom\n\nADDITIONAL DOCUMENTS TO CONSIDER\n\nNever claim that a document was reviewed unless the source supports that.\n\n============================================================\nQUESTIONS LENDER MAY ASK\n============================================================\n\nKeep these realistic but generic.\n\nExamples:\n\n- Why is restructuring being requested?\n- How are customer payment delays affecting cash flow?\n- What repayment structure is being requested?\n- What supporting documents are available?\n- How does the business expect to manage repayments under the proposed structure?\n\nDo not invent lender-specific policies.\n\n============================================================\nEVIDENCE-BASED RESPONSES\n============================================================\n\nResponses must use supplied facts.\n\nDo not promise future collections.\n\nDo not promise future revenue.\n\nDo not promise approval.\n\n============================================================\nNEXT STEPS\n============================================================\n\nKeep next steps practical.\n\nExamples:\n\n- prepare the restructuring request\n- collect the supplied financial documents\n- prepare additional documents if available\n- discuss the preferred illustrative option with lenders\n- compare lender-provided terms against the illustrative scenario\n- run a detailed 12-month cash-flow projection before committing\n\nDo not invent deadlines.\n\n============================================================\nDISCLAIMER\n============================================================\n\nThe disclaimer must clearly state:\n\nThis is illustrative financial decision-support only. It is not a lender decision, loan approval, financial offer, guarantee, or financial advice. Actual restructuring terms depend on lender assessment, approval, and contractual terms.\n\n============================================================\nFINAL QUALITY RULE\n============================================================\n\nBefore returning the JSON, check:\n\n1. No unsupported financial numbers.\n2. No invented dates.\n3. No invented collection dates.\n4. No invented lender approval.\n5. No \"customers have not paid\" when the source only says \"paying late\".\n6. No \"fixed expenses\" unless explicitly supplied.\n7. No claim that restructuring eliminates downside risk.\n8. No claim that the EMI is comfortable merely because it is lower.\n9. No claim that the recommended EMI fits the comfortable range unless the deterministic numbers prove it.\n10. No claim that restructuring solves the entire liquidity problem.\n11. Output must be valid JSON only.\n`;\n\n\n// ================================================================\n// 5. USER PROMPT\n// ================================================================\n\nconst userPrompt = `\nCreate the RESTRUCTRA bank-ready restructuring discussion plan using ONLY the evidence below.\n\nDo not calculate anything yourself.\n\nDo not invent facts.\n\nDo not invent financial values.\n\nDo not invent lender decisions.\n\nDo not invent future outcomes.\n\n============================================================\nBUSINESS DATA\n============================================================\n\n${JSON.stringify(\n  data,\n  null,\n  2\n)}\n\n============================================================\nDETERMINISTIC FINANCIAL ENGINE\n============================================================\n\n${JSON.stringify(\n  fin,\n  null,\n  2\n)}\n\n============================================================\nDETERMINISTIC SCENARIO BUNDLE\n============================================================\n\n${JSON.stringify(\n  scenarioBundle,\n  null,\n  2\n)}\n\n============================================================\nDIAGNOSIS / CLASSIFICATIONS\n============================================================\n\n${JSON.stringify(\n  classifications,\n  null,\n  2\n)}\n\n============================================================\nDATA CONFIDENCE\n============================================================\n\n${JSON.stringify(\n  dataConfidence,\n  null,\n  2\n)}\n\n============================================================\nRECONCILIATION CONFLICTS\n============================================================\n\n${JSON.stringify(\n  reconciliationConflicts,\n  null,\n  2\n)}\n\n============================================================\nVALIDATED AI RECOMMENDATION\n============================================================\n\n${JSON.stringify(\n  recommendation,\n  null,\n  2\n)}\n\n============================================================\nRECOMMENDATION VALIDATION\n============================================================\n\n${JSON.stringify(\n  recommendationValidation,\n  null,\n  2\n)}\n\n============================================================\nFINAL INSTRUCTION\n============================================================\n\nCreate the bank-ready discussion plan.\n\nThe validated recommendation is the primary recommendation.\n\nUse deterministic financial values exactly as supplied.\n\nIf the downside stress scenario remains negative after restructuring, explicitly state:\n\n\"The restructuring improves base-case cash-flow headroom but does not eliminate downside risk.\"\n\nReturn ONLY the required JSON object.\n`;\n\n\n// ================================================================\n// 6. OUTPUT\n// ================================================================\n\nreturn [\n  {\n    json: {\n      ...input,\n\n      systemPrompt,\n\n      prompt: userPrompt,\n\n      userPrompt,\n\n      bankReportPromptReady: true,\n\n      promptVersion:\n        \"RESTRUCTRA_BANK_REPORT_V2_EVIDENCE_CONTROLLED\",\n\n      promptContext: {\n        hasBusinessData:\n          !!data &&\n          Object.keys(data).length > 0,\n\n        hasFinancialEngine:\n          !!fin &&\n          Object.keys(fin).length > 0,\n\n        hasScenarioBundle:\n          !!scenarioBundle &&\n          Object.keys(scenarioBundle).length > 0,\n\n        hasRecommendation:\n          !!recommendation &&\n          Object.keys(recommendation).length > 0,\n\n        reconciliationConflictCount:\n          reconciliationConflicts.length,\n\n        classificationCount:\n          Array.isArray(classifications)\n            ? classifications.length\n            : 0\n      }\n    }\n  }\n];"
+      },
+      "id": "e07a6da0-d85d-4b75-ab8e-db376d4d4245",
+      "name": "Build Bank Report Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1424,
+        -272
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// RESTRUCTRA — VALIDATE & PARSE BANK REPORT\n// Version: V3\n//\n// PURPOSE\n// 1. Parse Groq bank-report JSON\n// 2. Accept the new AI schema\n// 3. Convert it into the legacy bankReport schema expected\n//    by Assemble Final Response\n// 4. Recover deterministic financial data from the engine\n// 5. Validate evidence / language / scenario traceability\n// 6. Fail closed if the AI report contains unsafe claims\n// ============================================================\n\n\n// ------------------------------------------------------------\n// 1. BASIC HELPERS\n// ------------------------------------------------------------\n\nfunction isObject(value) {\n  return value !== null &&\n    typeof value === 'object' &&\n    !Array.isArray(value);\n}\n\nfunction nonEmptyObject(value) {\n  return isObject(value) && Object.keys(value).length > 0;\n}\n\nfunction hasValue(value) {\n  return value !== undefined &&\n    value !== null &&\n    String(value).trim() !== '';\n}\n\nfunction firstDefined(...values) {\n  for (const value of values) {\n    if (hasValue(value)) return value;\n  }\n  return null;\n}\n\nfunction firstObject(...values) {\n  for (const value of values) {\n    if (nonEmptyObject(value)) return value;\n  }\n  return {};\n}\n\nfunction safeJsonParse(value) {\n  if (typeof value !== 'string') {\n    return null;\n  }\n\n  let raw = value.trim();\n\n  // Remove markdown fences if model added them\n  raw = raw\n    .replace(/^```json\\s*/i, '')\n    .replace(/^```\\s*/i, '')\n    .replace(/\\s*```$/i, '')\n    .trim();\n\n  try {\n    return JSON.parse(raw);\n  } catch (error) {\n    return null;\n  }\n}\n\nfunction asArray(value) {\n  if (Array.isArray(value)) return value;\n  if (hasValue(value)) return [String(value)];\n  return [];\n}\n\nfunction cleanText(value) {\n  if (!hasValue(value)) return '';\n  return String(value).trim();\n}\n\nfunction formatINR(value) {\n  if (!hasValue(value) || Number.isNaN(Number(value))) {\n    return '₹—';\n  }\n\n  return '₹' + Number(value).toLocaleString('en-IN', {\n    maximumFractionDigits: 2\n  });\n}\n\nfunction todayISO() {\n  return new Date().toISOString().slice(0, 10);\n}\n\n\n// ------------------------------------------------------------\n// 2. CURRENT GROQ RESPONSE\n// ------------------------------------------------------------\n\nconst input = $input.first().json;\n\n\n// ------------------------------------------------------------\n// 3. RECOVER DETERMINISTIC ENGINE NODE\n// ------------------------------------------------------------\n//\n// IMPORTANT:\n// This is the source of truth for all financial calculations.\n//\n// Expected node:\n// 04-06 Financial Engine, Scenarios, Diagnosis\n// ------------------------------------------------------------\n\nlet engineNode = {};\n\ntry {\n  engineNode = $('04-06 Financial Engine, Scenarios, Diagnosis')\n    .first()\n    .json || {};\n} catch (error) {\n  engineNode = {};\n}\n\n\n// ------------------------------------------------------------\n// 4. RECOVER RECOMMENDATION NODE\n// ------------------------------------------------------------\n\nlet recommendationNode = {};\n\ntry {\n  recommendationNode = $('Validate & Parse Recommendation')\n    .first()\n    .json || {};\n} catch (error) {\n  recommendationNode = {};\n}\n\n\n// ------------------------------------------------------------\n// 5. RECOVER BUILD BANK REPORT PROMPT NODE\n// ------------------------------------------------------------\n//\n// This node contains the original source business data and\n// deterministic scenario context used to build the prompt.\n// ------------------------------------------------------------\n\nlet promptNode = {};\n\ntry {\n  promptNode = $('Build Bank Report Prompt')\n    .first()\n    .json || {};\n} catch (error) {\n  promptNode = {};\n}\n\n\n// ------------------------------------------------------------\n// 6. SOURCE DATA\n// ------------------------------------------------------------\n\nconst sourceData = firstObject(\n  engineNode.data,\n  promptNode.data,\n  recommendationNode.data,\n  input.data\n);\n\nconst business = firstObject(\n  sourceData.business,\n  promptNode.business,\n  engineNode.business\n);\n\nconst loans =\n  Array.isArray(sourceData.loans)\n    ? sourceData.loans\n    : Array.isArray(promptNode.loans)\n      ? promptNode.loans\n      : Array.isArray(engineNode.loans)\n        ? engineNode.loans\n        : [];\n\n\n// ------------------------------------------------------------\n// 7. DETERMINISTIC FINANCIAL ENGINE\n// ------------------------------------------------------------\n\nconst financialEngine = firstObject(\n  engineNode.fin,\n  engineNode.financialEngine,\n  recommendationNode.fin,\n  promptNode.fin\n);\n\nconst financialEngineAvailable =\n  nonEmptyObject(financialEngine);\n\n\n// ------------------------------------------------------------\n// 8. DETERMINISTIC SCENARIO BUNDLE\n// ------------------------------------------------------------\n\nconst rawScenarioBundle = firstObject(\n  engineNode.scenarioBundle,\n  recommendationNode.scenarioBundle,\n  promptNode.scenarioBundle\n);\n\nconst scenarioBundle =\n  firstObject(\n    rawScenarioBundle.scenarios,\n    rawScenarioBundle\n  );\n\nconst scenarioEngineAvailable =\n  nonEmptyObject(scenarioBundle);\n\n\n// ------------------------------------------------------------\n// 9. CLASSIFICATIONS\n// ------------------------------------------------------------\n\nlet classifications =\n  Array.isArray(engineNode.classifications)\n    ? engineNode.classifications\n    : Array.isArray(recommendationNode.classifications)\n      ? recommendationNode.classifications\n      : [];\n\n\n// ------------------------------------------------------------\n// 10. DATA CONFIDENCE\n// ------------------------------------------------------------\n\nconst dataConfidence = firstObject(\n  engineNode.dataConfidence,\n  recommendationNode.dataConfidence,\n  promptNode.dataConfidence\n);\n\n\n// ------------------------------------------------------------\n// 11. RECONCILIATION\n// ------------------------------------------------------------\n\nconst reconciliationResults =\n  Array.isArray(engineNode.reconciliationResults)\n    ? engineNode.reconciliationResults\n    : Array.isArray(recommendationNode.reconciliationResults)\n      ? recommendationNode.reconciliationResults\n      : [];\n\nconst reconciliationConflicts =\n  reconciliationResults.flatMap(result =>\n    Array.isArray(result.conflicts)\n      ? result.conflicts\n      : []\n  );\n\n\n// ------------------------------------------------------------\n// 12. RECOVER VALIDATED RECOMMENDATION\n// ------------------------------------------------------------\n\nconst validatedRecommendation = firstObject(\n  recommendationNode.recommendation,\n  recommendationNode.validatedRecommendation,\n  promptNode.recommendation\n);\n\nconst recommendationValidation = firstObject(\n  recommendationNode.recommendationValidation,\n  promptNode.recommendationValidation\n);\n\nconst recommendationValid =\n  recommendationValidation.valid !== false &&\n  nonEmptyObject(validatedRecommendation);\n\n\n// ------------------------------------------------------------\n// 13. EXTRACT RAW GROQ TEXT\n// ------------------------------------------------------------\n\nlet rawBankReportText = '';\n\nconst possibleRawResponses = [\n  input.choices?.[0]?.message?.content,\n  input.body?.choices?.[0]?.message?.content,\n  input.response?.choices?.[0]?.message?.content,\n  input.data?.choices?.[0]?.message?.content,\n  input.bankReportRaw,\n  input.rawBankReport,\n  input.bankReportText,\n  input.response,\n  input.text,\n  input.content\n];\n\nfor (const candidate of possibleRawResponses) {\n  if (typeof candidate === 'string' && candidate.trim()) {\n    rawBankReportText = candidate.trim();\n    break;\n  }\n}\n\n\n// ------------------------------------------------------------\n// 14. PARSE AI RESPONSE\n// ------------------------------------------------------------\n\nlet parsedBankReport = {};\n\n\nif (rawBankReportText) {\n\n  const parsed = safeJsonParse(rawBankReportText);\n\n  if (nonEmptyObject(parsed)) {\n    parsedBankReport = parsed;\n  }\n\n}\n\n\n// ------------------------------------------------------------\n// 15. HANDLE WRAPPED AI RESPONSES\n// ------------------------------------------------------------\n\nif (nonEmptyObject(parsedBankReport.bankReport)) {\n  parsedBankReport = parsedBankReport.bankReport;\n}\n\nif (nonEmptyObject(parsedBankReport.report)) {\n  parsedBankReport = parsedBankReport.report;\n}\n\nif (nonEmptyObject(parsedBankReport.finalReport)) {\n  parsedBankReport = parsedBankReport.finalReport;\n}\n\n\nconst bankReportParsed =\n  nonEmptyObject(parsedBankReport);\n\n\n// ------------------------------------------------------------\n// 16. SOURCE BUSINESS VALUES\n// ------------------------------------------------------------\n\nconst monthlySales =\n  firstDefined(\n    business.monthlySales,\n    business.sales,\n    sourceData.monthlySales\n  );\n\nconst monthlyExpenses =\n  firstDefined(\n    business.monthlyExpenses,\n    business.expenses,\n    sourceData.monthlyExpenses\n  );\n\nconst cashReserve =\n  firstDefined(\n    business.cashReserve,\n    sourceData.cashReserve\n  );\n\nconst receivables =\n  firstDefined(\n    business.receivablesAmount,\n    business.receivables,\n    sourceData.receivablesAmount,\n    sourceData.receivables\n  );\n\nconst customersPayingLate =\n  firstDefined(\n    business.customersPayingLate,\n    sourceData.customersPayingLate\n  );\n\nconst businessType =\n  firstDefined(\n    business.type,\n    sourceData.businessType,\n    'Business'\n  );\n\nconst businessName =\n  firstDefined(\n    sourceData.businessName,\n    business.businessName,\n    'Business'\n  );\n\nconst incomeOutlook =\n  firstDefined(\n    business.incomeOutlook,\n    sourceData.incomeOutlook\n  );\n\nconst mainProblem =\n  firstDefined(\n    sourceData.mainProblem,\n    business.mainProblem\n  );\n\nconst urgency =\n  firstDefined(\n    sourceData.urgency,\n    business.urgency\n  );\n\n\n// ------------------------------------------------------------\n// 17. DOCUMENTS\n// ------------------------------------------------------------\n\nconst documents =\n  Array.isArray(sourceData.documents)\n    ? sourceData.documents\n    : Array.isArray(promptNode.documents)\n      ? promptNode.documents\n      : Array.isArray(engineNode.documents)\n        ? engineNode.documents\n        : [];\n\nconst suppliedDocumentNames =\n  documents\n    .map(doc => doc?.fileName)\n    .filter(Boolean);\n\n\n// ------------------------------------------------------------\n// 18. BUILD DETERMINISTIC CURRENT SNAPSHOT\n// ------------------------------------------------------------\n\nconst currentScenario =\n  firstObject(\n    scenarioBundle.current,\n    rawScenarioBundle.scenarios?.current\n  );\n\nconst currentFinancialSnapshot = {\n\n  monthlySales:\n    monthlySales,\n\n  monthlyExpenses:\n    monthlyExpenses,\n\n  cashReserve:\n    cashReserve,\n\n  receivables:\n    receivables,\n\n  customersPayingLate:\n    customersPayingLate,\n\n  loans:\n    loans,\n\n  totalMonthlyEMI:\n    financialEngine.totalMonthlyEMI,\n\n  totalOutstandingDebt:\n    financialEngine.totalOutstandingDebt,\n\n  availableAfterExpenses:\n    financialEngine.availableAfterExpenses,\n\n  availableAfterEMI:\n    financialEngine.availableAfterEMI,\n\n  internalDSCR:\n    financialEngine.internalDSCR,\n\n  emiToSalesRatio:\n    financialEngine.emiToSalesRatio,\n\n  emiToAvailableRatio:\n    financialEngine.emiToAvailableRatio,\n\n  cashReserveCoverageMonths:\n    financialEngine.cashReserveCoverageMonths,\n\n  receivablesRatio:\n    financialEngine.receivablesRatio,\n\n  debtConcentration:\n    financialEngine.debtConcentration,\n\n  weightedAvgInterestRate:\n    financialEngine.weightedAvgInterestRate,\n\n  weightedAvgTenureMonths:\n    financialEngine.weightedAvgTenureMonths,\n\n  comfortableEMIRange:\n    financialEngine.comfortableEMIRange\n\n};\n\n\n// ------------------------------------------------------------\n// 19. BUILD RECOMMENDED SCENARIO\n// ------------------------------------------------------------\n\nlet recommendedScenario = {};\n\nconst recommendationTitle =\n  validatedRecommendation.primaryRecommendation?.title ||\n  parsedBankReport.recommendedOption?.[0] ||\n  'Extend loan tenure by 50%';\n\n\nif (\n  recommendationTitle\n    .toLowerCase()\n    .includes('50%')\n) {\n\n  recommendedScenario =\n    firstObject(\n      scenarioBundle.extend_50pct,\n      scenarioBundle.longerRepayment?.extend_50pct\n    );\n\n}\n\n\n// Fallback to deterministic default\nif (!nonEmptyObject(recommendedScenario)) {\n\n  recommendedScenario =\n    firstObject(\n      scenarioBundle.extend_50pct,\n      scenarioBundle.longerRepayment?.extend_50pct\n    );\n\n}\n\n\n// ------------------------------------------------------------\n// 20. BUILD PROPOSED RESTRUCTURING OPTIONS\n// ------------------------------------------------------------\n\nconst proposedRestructuringOptions = [];\n\n\n// ---- 50% TENURE EXTENSION ----\n\nif (nonEmptyObject(recommendedScenario)) {\n\n  proposedRestructuringOptions.push({\n\n    option:\n      'Extend loan tenure by 50%',\n\n    status:\n      'Primary illustrative option',\n\n    newTenureMonths:\n      recommendedScenario.newTenureMonths,\n\n    newEMI:\n      recommendedScenario.newEMI,\n\n    EMIChange:\n      recommendedScenario.emiReduction,\n\n    estimatedAdditionalInterest:\n      recommendedScenario.estimatedAdditionalInterest,\n\n    monthlySurplusBase:\n      recommendedScenario.monthlySurplusDeficit?.base,\n\n    monthlySurplusStress:\n      recommendedScenario.monthlySurplusDeficit?.stress,\n\n    monthlySurplusRecovery:\n      recommendedScenario.monthlySurplusDeficit?.recovery,\n\n    rationale:\n      'This illustrative scenario lowers the monthly EMI and increases base-case cash-flow headroom.',\n\n    lenderNote:\n      'Option to discuss with the lender; actual terms depend on lender approval.'\n\n  });\n\n}\n\n\n// ---- TEMPORARY RELIEF ----\n\nconst temporaryRelief =\n  firstObject(\n    scenarioBundle.temporaryRelief\n  );\n\nif (nonEmptyObject(temporaryRelief)) {\n\n  proposedRestructuringOptions.push({\n\n    option:\n      '3-month temporary payment relief',\n\n    status:\n      'Alternative illustrative option',\n\n    reliefMonths:\n      temporaryRelief.reliefMonths,\n\n    paymentDuringRelief:\n      temporaryRelief.paymentDuringRelief,\n\n    accruedInterestDuringRelief:\n      temporaryRelief.accruedInterestDuringRelief,\n\n    postReliefEMI:\n      temporaryRelief.postReliefEMI,\n\n    monthlySurplusDuringReliefBase:\n      temporaryRelief.monthlySurplusDeficitDuringRelief?.base,\n\n    monthlySurplusAfterReliefBase:\n      temporaryRelief.monthlySurplusDeficitAfterRelief?.base,\n\n    lenderNote:\n      'Illustrative scenario only. The lender may or may not offer this exact structure.'\n\n  });\n\n}\n\n\n// ---- STEP DOWN ----\n\nconst stepDown =\n  firstObject(\n    scenarioBundle.stepDown\n  );\n\nif (nonEmptyObject(stepDown)) {\n\n  proposedRestructuringOptions.push({\n\n    option:\n      'Reduced EMI for 6 months, then step up',\n\n    status:\n      'Alternative illustrative option',\n\n    stepMonths:\n      stepDown.stepMonths,\n\n    reducedEMI:\n      stepDown.reducedEMI,\n\n    subsequentEMI:\n      stepDown.subsequentEMI,\n\n    monthlySurplusDuringStepBase:\n      stepDown.monthlySurplusDeficitDuringStep?.base,\n\n    monthlySurplusAfterStepBase:\n      stepDown.monthlySurplusDeficitAfterStep?.base,\n\n    lenderNote:\n      'Illustrative scenario only. Actual terms depend on lender approval.'\n\n  });\n\n}\n\n\n// ------------------------------------------------------------\n// 21. NON-PREFERRED CONSOLIDATION\n// ------------------------------------------------------------\n\nconst consolidation =\n  firstObject(\n    scenarioBundle.consolidation\n  );\n\nconst alternativeOptionNotPreferred = [];\n\nif (nonEmptyObject(consolidation)) {\n\n  alternativeOptionNotPreferred.push({\n\n    title:\n      'Consolidate all loans into a single facility',\n\n    reason:\n      consolidation.note ||\n      'The deterministic calculation does not show enough benefit to recommend consolidation on its own.',\n\n    consolidatedEMI:\n      consolidation.consolidatedEMI,\n\n    monthlySurplusBase:\n      consolidation.monthlySurplusDeficit?.base\n\n  });\n\n}\n\n\n// ------------------------------------------------------------\n// 22. BUILD SAFE EXECUTIVE SUMMARY\n// ------------------------------------------------------------\n\nlet executiveSummary =\n  cleanText(parsedBankReport.executiveSummary);\n\nif (!executiveSummary) {\n\n  executiveSummary =\n    `${businessName} is a ${businessType.toLowerCase()} business with reported monthly sales of ${formatINR(monthlySales)} and reported monthly expenses of ${formatINR(monthlyExpenses)}. Reported receivables total ${formatINR(receivables)}, and customers are reported as paying late. Current monthly EMI across the reported loans is ${formatINR(financialEngine.totalMonthlyEMI)}.`;\n\n}\n\n\n// ------------------------------------------------------------\n// 23. BUILD SAFE KEY ISSUES\n// ------------------------------------------------------------\n\nlet keyIssues =\n  asArray(parsedBankReport.keyIssues);\n\nif (keyIssues.length === 0) {\n\n  keyIssues = [\n\n    `Reported receivables total ${formatINR(receivables)}, and customers are reported as paying late.`,\n\n    `Current total monthly EMI is ${formatINR(financialEngine.totalMonthlyEMI)} across ${loans.length} reported loans.`,\n\n    `Current base-case cash-flow headroom after EMI is ${formatINR(financialEngine.availableAfterEMI)}.`,\n\n    `A -20% revenue stress illustration produces a negative monthly surplus/deficit of ${formatINR(currentScenario.monthlySurplusDeficit?.stress)} under the current repayment structure.`\n\n  ];\n\n}\n\n\n// ------------------------------------------------------------\n// 24. BUILD SAFE RISK ASSESSMENT\n// ------------------------------------------------------------\n\nlet riskAssessment =\n  asArray(parsedBankReport.riskAssessment);\n\nif (riskAssessment.length === 0) {\n\n  riskAssessment = [\n\n    `The 50% tenure-extension scenario increases estimated additional interest by ${formatINR(recommendedScenario.estimatedAdditionalInterest)}.`,\n\n    `The downside stress scenario remains negative at ${formatINR(recommendedScenario.monthlySurplusDeficit?.stress)} per month.`,\n\n    `The restructuring improves base-case cash-flow headroom but does not eliminate downside risk.`,\n\n    `Actual restructuring terms depend on lender assessment, approval, and contractual terms.`\n\n  ];\n\n}\n\n\n// Always ensure the stress warning exists\nconst stressWarning =\n  'The restructuring improves base-case cash-flow headroom but does not eliminate downside risk.';\n\nif (\n  !riskAssessment.some(\n    text =>\n      String(text)\n        .toLowerCase()\n        .includes('does not eliminate downside risk')\n  )\n) {\n  riskAssessment.push(stressWarning);\n}\n\n\n// ------------------------------------------------------------\n// 25. BUILD REQUIRED DOCUMENTATION\n// ------------------------------------------------------------\n\nlet requiredDocumentation =\n  asArray(parsedBankReport.requiredDocumentation);\n\nif (requiredDocumentation.length === 0) {\n\n  requiredDocumentation = [];\n\n  if (suppliedDocumentNames.includes('bank_statement_6month.txt')) {\n    requiredDocumentation.push(\n      'Last 6 months bank statement — supplied.'\n    );\n  }\n\n  for (const loan of loans) {\n\n    const lender =\n      loan?.lender || 'lender';\n\n    const matchingDoc =\n      documents.find(\n        doc =>\n          doc?.documentType === 'loan_statement' &&\n          String(doc?.fields?.[0]?.value || '')\n            .toLowerCase()\n            .includes(String(lender).toLowerCase())\n      );\n\n    if (matchingDoc) {\n\n      requiredDocumentation.push(\n        `Loan statement for ${lender} — supplied.`\n      );\n\n    }\n\n  }\n\n  if (\n    suppliedDocumentNames.includes(\n      'gst_sales_summary.txt'\n    )\n  ) {\n\n    requiredDocumentation.push(\n      'GST sales summary — supplied.'\n    );\n\n  }\n\n  if (\n    suppliedDocumentNames.includes(\n      'receivables_list.txt'\n    )\n  ) {\n\n    requiredDocumentation.push(\n      'Receivables list — supplied.'\n    );\n\n  }\n\n  requiredDocumentation.push(\n    'Additional cash-flow projection for the chosen restructuring option, if available.'\n  );\n\n}\n\n\n// ------------------------------------------------------------\n// 26. BUILD NEXT STEPS\n// ------------------------------------------------------------\n\nlet nextSteps =\n  asArray(parsedBankReport.nextSteps);\n\nif (nextSteps.length === 0) {\n\n  nextSteps = [\n\n    'Prepare a formal restructuring request outlining the preferred 50% tenure-extension option.',\n\n    'Organize the supplied bank statement, loan statements, GST sales summary, and receivables list for lender review.',\n\n    'Discuss the preferred illustrative option with lenders soon, given the stated 1–3 month urgency.',\n\n    'Compare any lender-provided terms against the illustrative scenarios before finalizing an agreement.'\n\n  ];\n\n}\n\n\n// ------------------------------------------------------------\n// 27. BUILD LEGACY BANK REPORT SCHEMA\n// ------------------------------------------------------------\n//\n// THIS IS THE IMPORTANT FIX.\n//\n// The AI now produces the new explanation-oriented schema.\n// This section converts it into the old schema expected by\n// Assemble Final Response and the frontend.\n// ------------------------------------------------------------\n\nconst bankReport = {\n\n  businessName:\n    businessName,\n\n  date:\n    firstDefined(\n      parsedBankReport.date,\n      todayISO()\n    ),\n\n  executiveSummary:\n    executiveSummary,\n\n  currentFinancialSnapshot:\n    currentFinancialSnapshot,\n\n  keyIssues:\n    keyIssues,\n\n  proposedRestructuringOptions:\n    proposedRestructuringOptions,\n\n  alternativeOptionNotPreferred:\n    alternativeOptionNotPreferred,\n\n  riskAssessment:\n    riskAssessment,\n\n  requiredDocumentation:\n    requiredDocumentation,\n\n  nextSteps:\n    nextSteps,\n\n  disclaimer:\n    'This is illustrative financial decision-support only. It is not a lender decision, loan approval, financial offer, guarantee, or financial advice. Actual restructuring terms depend on lender assessment, approval, and contractual terms.'\n\n};\n\n\n// ------------------------------------------------------------\n// 28. LANGUAGE SAFETY CHECK\n// ------------------------------------------------------------\n\nconst reportText =\n  JSON.stringify(bankReport).toLowerCase();\n\nconst forbiddenClaims = [\n\n  'post-restructuring solvency',\n\n  'demonstrate solvency',\n\n  'comfortably covers operating needs',\n\n  'buffer for revenue volatility',\n\n  'customers have not paid',\n\n  'overdue customers',\n\n  'overdue invoices',\n\n  'fixed expenses',\n\n  'remains manageable',\n\n  'manageable emi',\n\n  'comfortable emi',\n\n  'affordable emi',\n\n  'will prevent default',\n\n  'will recover',\n\n  'will collect',\n\n  'customers will pay',\n\n  'customers are expected to pay',\n\n  'lender will approve',\n\n  'bank will approve',\n\n  'guaranteed approval',\n\n  'guaranteed restructuring',\n\n  'approved restructuring',\n\n  'sanctioned restructuring'\n\n];\n\nconst detectedForbiddenClaims =\n  forbiddenClaims.filter(\n    phrase =>\n      reportText.includes(phrase)\n  );\n\n\n// ------------------------------------------------------------\n// 29. RECOMMENDATION TRACEABILITY\n// ------------------------------------------------------------\n\nconst recommendationScenarioFound =\n  proposedRestructuringOptions.some(\n    option =>\n      String(option.option)\n        .toLowerCase()\n        .includes('50%')\n  );\n\n\n// ------------------------------------------------------------\n// 30. ENGINE VALIDATION\n// ------------------------------------------------------------\n\nconst requiredEngineFields = [\n\n  'totalMonthlyEMI',\n\n  'totalOutstandingDebt',\n\n  'availableAfterExpenses',\n\n  'availableAfterEMI',\n\n  'internalDSCR'\n\n];\n\nconst missingEngineFields =\n  requiredEngineFields.filter(\n    field =>\n      financialEngine[field] === undefined ||\n      financialEngine[field] === null\n  );\n\n\n// ------------------------------------------------------------\n// 31. BASIC BANK REPORT VALIDATION\n// ------------------------------------------------------------\n\nconst requiredReportFields = [\n\n  'businessName',\n\n  'date',\n\n  'executiveSummary',\n\n  'currentFinancialSnapshot',\n\n  'keyIssues',\n\n  'proposedRestructuringOptions',\n\n  'riskAssessment',\n\n  'requiredDocumentation',\n\n  'nextSteps',\n\n  'disclaimer'\n\n];\n\nconst missingReportFields =\n  requiredReportFields.filter(\n    field =>\n      !hasValue(bankReport[field])\n  );\n\n\n// ------------------------------------------------------------\n// 32. VALIDATION ERRORS\n// ------------------------------------------------------------\n\nconst errors = [];\n\n\n// Parse error\nif (!bankReportParsed) {\n\n  errors.push(\n    'Bank report could not be parsed from the AI response.'\n  );\n\n}\n\n\n// Required fields\nif (missingReportFields.length > 0) {\n\n  errors.push(\n    `Bank report is missing required fields: ${missingReportFields.join(', ')}`\n  );\n\n}\n\n\n// Engine\nif (missingEngineFields.length > 0) {\n\n  errors.push(\n    `Deterministic financial engine is missing required fields: ${missingEngineFields.join(', ')}`\n  );\n\n}\n\n\n// Recommendation\nif (\n  recommendationValid &&\n  !recommendationScenarioFound\n) {\n\n  errors.push(\n    'The validated 50% tenure-extension scenario was not found in proposedRestructuringOptions.'\n  );\n\n}\n\n\n// Unsafe language\nif (detectedForbiddenClaims.length > 0) {\n\n  errors.push(\n    `Unsupported or unsafe language detected: ${detectedForbiddenClaims.join(', ')}`\n  );\n\n}\n\n\n// Reconciliation\nif (reconciliationConflicts.length > 0) {\n\n  errors.push(\n    `Reconciliation conflicts detected: ${reconciliationConflicts.length}`\n  );\n\n}\n\n\n// ------------------------------------------------------------\n// 33. FINAL VALIDATION STATUS\n// ------------------------------------------------------------\n\nconst bankReportValid =\n  errors.length === 0;\n\nconst validationPassed =\n  bankReportValid &&\n  financialEngineAvailable &&\n  scenarioEngineAvailable;\n\n\n// ------------------------------------------------------------\n// 34. FINAL OUTPUT\n// ------------------------------------------------------------\n\nreturn [\n\n  {\n\n    json: {\n\n      validationPassed,\n\n      valid:\n        validationPassed,\n\n      systemStatus:\n        validationPassed\n          ? 'SUCCESS'\n          : 'NEEDS_CONFIRMATION',\n\n      errors,\n\n      warnings: [],\n\n      aiUnavailable:\n        !bankReportParsed,\n\n      bankReport:\n        bankReportValid\n          ? bankReport\n          : null,\n\n      bankReportValid,\n\n      bankReportParsed,\n\n      missingReportFields,\n\n      parsedBankReport,\n\n      financialEngine,\n\n      deterministicEngineAvailable:\n        financialEngineAvailable,\n\n      missingEngineFields,\n\n      deterministicSnapshot:\n        currentFinancialSnapshot,\n\n      scenarioBundle:\n        rawScenarioBundle,\n\n      scenarioEngineAvailable,\n\n      scenarioSnapshot:\n        scenarioBundle,\n\n      reconciliation:\n        reconciliationResults,\n\n      reconciliationHasConflict:\n        reconciliationConflicts.length > 0,\n\n      reconciliationConflicts,\n\n      classifications,\n\n      dataConfidence,\n\n      confidenceScore:\n        dataConfidence.score ?? null,\n\n      confidenceLevel:\n        dataConfidence.level ?? null,\n\n      validatedRecommendation,\n\n      recommendationValid,\n\n      recommendationValidation,\n\n      finalReport: {\n\n        bankReport:\n          bankReportValid\n            ? bankReport\n            : null,\n\n        recommendation:\n          recommendationValid\n            ? validatedRecommendation\n            : null,\n\n        financialSnapshot:\n          currentFinancialSnapshot,\n\n        scenarios:\n          scenarioBundle,\n\n        classifications,\n\n        dataConfidence,\n\n        validation: {\n\n          passed:\n            validationPassed,\n\n          errors\n\n        }\n\n      },\n\n      bankReportDiagnostic: {\n\n        extractedTextFound:\n          rawBankReportText.length > 0,\n\n        extractedTextLength:\n          rawBankReportText.length,\n\n        parsedSuccessfully:\n          bankReportParsed,\n\n        expectedReportKeys:\n          requiredReportFields,\n\n        missingReportFields,\n\n        financialEngineRecovered:\n          financialEngineAvailable,\n\n        scenarioBundleRecovered:\n          scenarioEngineAvailable,\n\n        recommendationRecovered:\n          recommendationValid,\n\n        recommendationScenarioFound,\n\n        reconciliationConflictCount:\n          reconciliationConflicts.length,\n\n        classificationCount:\n          classifications.length,\n\n        languageCheckPassed:\n          detectedForbiddenClaims.length === 0,\n\n        detectedForbiddenClaims\n\n      },\n\n      debug: {\n\n        currentInputKeys:\n          Object.keys(input),\n\n        engineNodeKeys:\n          Object.keys(engineNode),\n\n        engineFinFound:\n          financialEngineAvailable,\n\n        engineFinKeys:\n          Object.keys(financialEngine),\n\n        recommendationNodeKeys:\n          Object.keys(recommendationNode),\n\n        recommendationFound:\n          recommendationValid,\n\n        rawBankReportFound:\n          rawBankReportText.length > 0,\n\n        rawBankReportLength:\n          rawBankReportText.length,\n\n        bankReportParsed,\n\n        bankReportValid,\n\n        financialEngineFound:\n          financialEngineAvailable,\n\n        scenarioBundleFound:\n          scenarioEngineAvailable,\n\n        reconciliationFound:\n          reconciliationResults.length > 0,\n\n        classificationsFound:\n          classifications.length > 0,\n\n        dataConfidenceFound:\n          nonEmptyObject(dataConfidence)\n\n      },\n\n      disclaimer:\n        'RESTRUCTRA provides illustrative decision-support based on supplied information and deterministic calculations. It is not a lender decision, approval, offer, guarantee, or financial advice.'\n\n    }\n\n  }\n\n];"
+      },
+      "id": "2f1859ee-ac16-4b04-9124-51e3b0880010",
+      "name": "Validate & Parse Bank Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1952,
+        -272
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// RESTRUCTRA — ASSEMBLE FINAL RESPONSE\n// V2 — FINAL DATA RECOVERY FIX\n// ============================================================\n\nfunction isObject(value) {\n  return value !== null &&\n    typeof value === 'object' &&\n    !Array.isArray(value);\n}\n\nfunction firstDefined(...values) {\n  for (const value of values) {\n    if (\n      value !== undefined &&\n      value !== null &&\n      String(value).trim() !== ''\n    ) {\n      return value;\n    }\n  }\n  return null;\n}\n\nfunction firstObject(...values) {\n  for (const value of values) {\n    if (\n      isObject(value) &&\n      Object.keys(value).length > 0\n    ) {\n      return value;\n    }\n  }\n  return {};\n}\n\nfunction firstArray(...values) {\n  for (const value of values) {\n    if (Array.isArray(value)) {\n      return value;\n    }\n  }\n  return [];\n}\n\n\n// ------------------------------------------------------------\n// CURRENT INPUT\n// ------------------------------------------------------------\n\nconst input = $input.first().json;\n\n\n// ------------------------------------------------------------\n// VALIDATED BANK REPORT\n// ------------------------------------------------------------\n\nconst bankReport =\n  firstObject(\n    input.bankReport,\n    input.finalReport?.bankReport\n  );\n\n\n// ------------------------------------------------------------\n// VALIDATED RECOMMENDATION\n// ------------------------------------------------------------\n\nconst recommendation =\n  firstObject(\n    input.validatedRecommendation,\n    input.recommendation,\n    input.finalReport?.recommendation\n  );\n\n\n// ------------------------------------------------------------\n// DETERMINISTIC FINANCIAL ENGINE\n// ------------------------------------------------------------\n\nconst financialEngine =\n  firstObject(\n    input.financialEngine,\n    input.finalReport?.financialSnapshot\n  );\n\n\n// ------------------------------------------------------------\n// SCENARIOS\n// ------------------------------------------------------------\n\nconst scenarios =\n  firstObject(\n    input.scenarioBundle,\n    input.scenarios,\n    input.finalReport?.scenarios\n  );\n\n\n// ------------------------------------------------------------\n// SOURCE ENGINE NODE\n// ------------------------------------------------------------\n//\n// This is the authoritative upstream source for:\n// - classifications\n// - reconciliation\n// - confidence\n//\n// Do NOT rely only on the validator's recovered copies,\n// because those may intentionally be empty when the validator\n// does not need them for pass/fail.\n// ------------------------------------------------------------\n\nlet engine = {};\n\ntry {\n\n  engine =\n    $('04-06 Financial Engine, Scenarios, Diagnosis')\n      .first()\n      .json || {};\n\n} catch (error) {\n\n  engine = {};\n\n}\n\n\n// ------------------------------------------------------------\n// CLASSIFICATIONS\n// ------------------------------------------------------------\n\nconst classifications =\n  firstArray(\n    input.classifications,\n    input.finalReport?.classifications,\n    engine.classifications\n  );\n\n\n// ------------------------------------------------------------\n// RECONCILIATION\n// ------------------------------------------------------------\n\nconst reconciliationResults =\n  firstArray(\n    input.reconciliation?.results,\n    input.reconciliationResults,\n    engine.reconciliationResults\n  );\n\nconst reconciliationConflicts =\n  firstArray(\n    input.reconciliation?.conflicts,\n    engine.reconciliationResults\n      ?.flatMap(r =>\n        Array.isArray(r.conflicts)\n          ? r.conflicts\n          : []\n      )\n  );\n\n\n// ------------------------------------------------------------\n// BUILD RECONCILIATION OBJECT\n// ------------------------------------------------------------\n\nconst reconciliation = {\n\n  results:\n    reconciliationResults,\n\n  hasConflict:\n    Boolean(\n      input.reconciliation?.hasConflict\n    ) ||\n    reconciliationConflicts.length > 0,\n\n  conflicts:\n    reconciliationConflicts\n\n};\n\n\n// ------------------------------------------------------------\n// DATA CONFIDENCE\n// ------------------------------------------------------------\n\nconst dataConfidence =\n  firstObject(\n    input.dataConfidence,\n    input.finalReport?.dataConfidence,\n    engine.dataConfidence\n  );\n\n\n// ------------------------------------------------------------\n// FINANCIAL SNAPSHOT\n// ------------------------------------------------------------\n//\n// Keep the validated snapshot first.\n// Then recover missing source fields if required.\n// ------------------------------------------------------------\n\nconst validatedSnapshot =\n  firstObject(\n    input.deterministicSnapshot,\n    input.financialSnapshot,\n    input.finalReport?.financialSnapshot\n  );\n\nconst sourceData =\n  firstObject(\n    engine.data,\n    input.data\n  );\n\nconst business =\n  firstObject(\n    sourceData.business,\n    input.business\n  );\n\n\nconst financialSnapshot = {\n\n  ...validatedSnapshot,\n\n  monthlySales:\n    firstDefined(\n      validatedSnapshot.monthlySales,\n      financialEngine.monthlySales,\n      business.monthlySales\n    ),\n\n  monthlyExpenses:\n    firstDefined(\n      validatedSnapshot.monthlyExpenses,\n      financialEngine.monthlyExpenses,\n      business.monthlyExpenses\n    ),\n\n  cashReserve:\n    firstDefined(\n      validatedSnapshot.cashReserve,\n      financialEngine.cashReserve,\n      business.cashReserve\n    ),\n\n  receivables:\n    firstDefined(\n      validatedSnapshot.receivables,\n      financialEngine.receivables,\n      business.receivablesAmount,\n      sourceData.receivablesAmount\n    )\n\n};\n\n\n// ------------------------------------------------------------\n// DASHBOARD\n// ------------------------------------------------------------\n\nconst dashboard = {\n\n  businessName:\n    bankReport.businessName ||\n    input.business?.name ||\n    'Business',\n\n  analysisDate:\n    bankReport.date ||\n    new Date().toISOString().slice(0, 10),\n\n  financialHealth: {\n\n    monthlySales:\n      financialSnapshot.monthlySales,\n\n    monthlyExpenses:\n      financialSnapshot.monthlyExpenses,\n\n    cashReserve:\n      financialSnapshot.cashReserve,\n\n    receivables:\n      financialSnapshot.receivables,\n\n    totalMonthlyEMI:\n      financialSnapshot.totalMonthlyEMI ??\n      financialEngine.totalMonthlyEMI,\n\n    totalOutstandingDebt:\n      financialSnapshot.totalOutstandingDebt ??\n      financialEngine.totalOutstandingDebt,\n\n    availableAfterExpenses:\n      financialSnapshot.availableAfterExpenses ??\n      financialEngine.availableAfterExpenses,\n\n    availableAfterEMI:\n      financialSnapshot.availableAfterEMI ??\n      financialEngine.availableAfterEMI,\n\n    internalDSCR:\n      financialSnapshot.internalDSCR ??\n      financialEngine.internalDSCR,\n\n    emiToSalesRatio:\n      financialSnapshot.emiToSalesRatio ??\n      financialEngine.emiToSalesRatio,\n\n    emiToAvailableRatio:\n      financialSnapshot.emiToAvailableRatio ??\n      financialEngine.emiToAvailableRatio,\n\n    cashReserveCoverageMonths:\n      financialSnapshot.cashReserveCoverageMonths ??\n      financialEngine.cashReserveCoverageMonths,\n\n    receivablesRatio:\n      financialSnapshot.receivablesRatio ??\n      financialEngine.receivablesRatio,\n\n    debtConcentration:\n      financialSnapshot.debtConcentration ??\n      financialEngine.debtConcentration,\n\n    weightedAvgInterestRate:\n      financialSnapshot.weightedAvgInterestRate ??\n      financialEngine.weightedAvgInterestRate,\n\n    weightedAvgTenureMonths:\n      financialSnapshot.weightedAvgTenureMonths ??\n      financialEngine.weightedAvgTenureMonths\n\n  },\n\n\n  // ----------------------------------------------------------\n  // STRESS DIAGNOSIS\n  // ----------------------------------------------------------\n\n  stressDiagnosis: {\n\n    classifications,\n\n    currentSurplus:\n      scenarios.current\n        ?.monthlySurplusDeficit\n        ?.base ?? null,\n\n    stressSurplus:\n      scenarios.current\n        ?.monthlySurplusDeficit\n        ?.stress ?? null,\n\n    recoverySurplus:\n      scenarios.current\n        ?.monthlySurplusDeficit\n        ?.recovery ?? null,\n\n    stressRevenueChangePct:\n      scenarios.stressAssumptions\n        ?.stressRevenueChangePct ?? null,\n\n    recoveryRevenueChangePct:\n      scenarios.stressAssumptions\n        ?.recoveryRevenueChangePct ?? null\n\n  },\n\n\n  // ----------------------------------------------------------\n  // RESTRUCTURING\n  // ----------------------------------------------------------\n\n  restructuring: {\n\n    recommendedOption:\n      recommendation.primaryRecommendation\n        ?.title ??\n      null,\n\n    recommendedScenario:\n      scenarios.extend_50pct\n        ? {\n            label:\n              scenarios.extend_50pct.label,\n\n            newTenureMonths:\n              scenarios.extend_50pct.newTenureMonths,\n\n            newEMI:\n              scenarios.extend_50pct.newEMI,\n\n            emiReduction:\n              scenarios.extend_50pct.emiReduction,\n\n            estimatedAdditionalInterest:\n              scenarios.extend_50pct\n                .estimatedAdditionalInterest,\n\n            monthlySurplusDeficit:\n              scenarios.extend_50pct\n                .monthlySurplusDeficit,\n\n            disclaimer:\n              scenarios.extend_50pct.disclaimer\n          }\n        : null\n\n  },\n\n\n  // ----------------------------------------------------------\n  // CONFIDENCE\n  // ----------------------------------------------------------\n\n  confidence: {\n\n    score:\n      dataConfidence.score ?? null,\n\n    level:\n      dataConfidence.level ?? null\n\n  }\n\n};\n\n\n// ------------------------------------------------------------\n// FINAL OUTPUT\n// ------------------------------------------------------------\n\nreturn [\n\n  {\n\n    json: {\n\n      status:\n        input.systemStatus ||\n        'SUCCESS',\n\n      success:\n        input.valid === true ||\n        input.validationPassed === true,\n\n      validationPassed:\n        input.validationPassed === true,\n\n      errors:\n        Array.isArray(input.errors)\n          ? input.errors\n          : [],\n\n      warnings:\n        Array.isArray(input.warnings)\n          ? input.warnings\n          : [],\n\n\n      // ------------------------------------------------------\n      // BUSINESS\n      // ------------------------------------------------------\n\n      business: {\n\n        name:\n          bankReport.businessName ||\n          'Business',\n\n        analysisDate:\n          bankReport.date ||\n          new Date()\n            .toISOString()\n            .slice(0, 10)\n\n      },\n\n\n      executiveSummary:\n        bankReport.executiveSummary ||\n        '',\n\n\n      // ------------------------------------------------------\n      // FRONTEND-FRIENDLY DASHBOARD\n      // ------------------------------------------------------\n\n      dashboard,\n\n\n      // ------------------------------------------------------\n      // FULL FINANCIAL SNAPSHOT\n      // ------------------------------------------------------\n\n      financialSnapshot,\n\n\n      // ------------------------------------------------------\n      // FULL SCENARIOS\n      // ------------------------------------------------------\n\n      scenarios,\n\n\n      // ------------------------------------------------------\n      // AI RECOMMENDATION\n      // ------------------------------------------------------\n\n      recommendation,\n\n\n      // ------------------------------------------------------\n      // ACTION PLAN\n      // ------------------------------------------------------\n\n      actionPlan: {\n\n        primaryAction:\n          recommendation.primaryRecommendation\n            ?.title ?? null,\n\n        explanation:\n          recommendation.primaryRecommendation\n            ?.explanation ?? '',\n\n        alternativeOptions:\n          recommendation.alternativeOptions ?? [],\n\n        risksAndTradeoffs:\n          recommendation.risksAndTradeoffs ?? [],\n\n        lenderDiscussionPoints:\n          recommendation.lenderDiscussionPoints ?? []\n\n      },\n\n\n      // ------------------------------------------------------\n      // BANK REPORT\n      // ------------------------------------------------------\n\n      bankReport,\n\n\n      // ------------------------------------------------------\n      // DOCUMENTATION\n      // ------------------------------------------------------\n\n      documentationChecklist:\n        bankReport.requiredDocumentation ?? [],\n\n\n      // ------------------------------------------------------\n      // RESTORED CLASSIFICATIONS\n      // ------------------------------------------------------\n\n      classifications,\n\n\n      // ------------------------------------------------------\n      // RESTORED RECONCILIATION\n      // ------------------------------------------------------\n\n      reconciliation,\n\n\n      // ------------------------------------------------------\n      // CONFIDENCE\n      // ------------------------------------------------------\n\n      dataConfidence,\n\n\n      // ------------------------------------------------------\n      // DETAILED FINANCIAL VIEW\n      // ------------------------------------------------------\n\n      detailedFinancialView: {\n\n        engine:\n          financialEngine,\n\n        financialSnapshot,\n\n        scenarios,\n\n        reconciliation,\n\n        classifications,\n\n        dataConfidence,\n\n        recommendation\n\n      },\n\n\n      // ------------------------------------------------------\n      // VALIDATION SUMMARY\n      // ------------------------------------------------------\n\n      validationSummary: {\n\n        passed:\n          input.validationPassed === true,\n\n        upstreamValidationPassed:\n          input.validationPassed === true,\n\n        bankReportAvailable:\n          Object.keys(bankReport).length > 0,\n\n        recommendationAvailable:\n          Object.keys(recommendation).length > 0,\n\n        recommendationValid:\n          input.recommendationValid !== false,\n\n        financialEngineAvailable:\n          Object.keys(financialEngine).length > 0,\n\n        scenariosAvailable:\n          Object.keys(scenarios).length > 0,\n\n        missingCriticalFinancialFields: [],\n\n        reconciliationHasConflict:\n          reconciliation.hasConflict\n\n      },\n\n\n      // ------------------------------------------------------\n      // DEBUG\n      // ------------------------------------------------------\n\n      debug: {\n\n        engineNodeKeys:\n          Object.keys(engine),\n\n        engineFinAvailable:\n          Object.keys(financialEngine).length > 0,\n\n        classificationsRecovered:\n          classifications.length > 0,\n\n        classificationCount:\n          classifications.length,\n\n        reconciliationRecovered:\n          reconciliationResults.length > 0,\n\n        reconciliationResultCount:\n          reconciliationResults.length,\n\n        reconciliationConflict:\n          reconciliation.hasConflict,\n\n        financialEngineRecovered:\n          Object.keys(financialEngine).length > 0,\n\n        recommendationRecovered:\n          Object.keys(recommendation).length > 0,\n\n        bankReportRecovered:\n          Object.keys(bankReport).length > 0,\n\n        sourceDataRecovered:\n          Object.keys(sourceData).length > 0,\n\n        financialSnapshotRecovered:\n          Object.keys(financialSnapshot).length > 0,\n\n        criticalFinancialFieldsPresent:\n          financialSnapshot.monthlySales !== null &&\n          financialSnapshot.monthlyExpenses !== null &&\n          financialSnapshot.cashReserve !== null &&\n          financialSnapshot.receivables !== null,\n\n        finalValidation:\n          input.validationPassed === true\n\n      },\n\n\n      disclaimer:\n        'RESTRUCTRA provides illustrative decision-support based on supplied information and deterministic calculations. It is not a lender decision, approval, offer, guarantee, or financial advice.'\n\n    }\n\n  }\n\n];"
+      },
+      "id": "13bda598-759e-4167-88a6-87d898cc1e78",
+      "name": "Assemble Final Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2208,
+        -272
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "9e254fe9-6084-4721-aaac-9ec8942757c5",
+      "name": "Respond - Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        2464,
+        -272
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + ($env.GROQ_API_KEY || '') }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "body": "={{ JSON.stringify({\n  model: \"openai/gpt-oss-120b\",\n  messages: [\n    {\n      role: \"system\",\n      content: $json.aiRequest.system\n    },\n    {\n      role: \"user\",\n      content: $json.aiRequest.messages[0].content\n    }\n  ],\n  reasoning_effort: \"low\",\n  response_format: {\n    type: \"json_object\"\n  }\n}) }}",
+        "options": {}
+      },
+      "id": "f504a099-3a1d-4806-a14b-d0e8ab6a8b5c",
+      "name": "LLM Recommendation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        912,
+        -272
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + ($env.GROQ_API_KEY || '') }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "body": "={{ JSON.stringify({\n  model: \"openai/gpt-oss-120b\",\n\n  temperature: 0.1,\n\n  max_tokens: 3500,\n\n  messages: [\n    {\n      role: \"system\",\n      content:\n        $node[\"Build Bank Report Prompt\"].json.systemPrompt\n        || $node[\"Build Bank Report Prompt\"].json.system\n        || \"You are RESTRUCTRA, an AI-based financial restructuring decision-support assistant for MSMEs. Return only valid JSON.\"\n    },\n\n    {\n      role: \"user\",\n      content:\n        $node[\"Build Bank Report Prompt\"].json.prompt\n        || $node[\"Build Bank Report Prompt\"].json.userPrompt\n        || $node[\"Build Bank Report Prompt\"].json.content\n        || JSON.stringify({\n          instruction:\n            \"Create a bank-ready restructuring discussion plan using only the supplied evidence and deterministic financial analysis. Do not invent facts, calculations, collection timelines, collateral details, lender decisions, or future outcomes.\",\n\n          businessData:\n            $node[\"04-06 Financial Engine, Scenarios, Diagnosis\"].json.data\n            || {},\n\n          financialEngine:\n            $node[\"04-06 Financial Engine, Scenarios, Diagnosis\"].json.financialEngine\n            || {},\n\n          scenarioBundle:\n            $node[\"04-06 Financial Engine, Scenarios, Diagnosis\"].json.scenarioBundle\n            || {},\n\n          classifications:\n            $node[\"04-06 Financial Engine, Scenarios, Diagnosis\"].json.classifications\n            || [],\n\n          reconciliationResults:\n            $node[\"04-06 Financial Engine, Scenarios, Diagnosis\"].json.reconciliationResults\n            || [],\n\n          dataConfidence:\n            $node[\"04-06 Financial Engine, Scenarios, Diagnosis\"].json.dataConfidence\n            || {},\n\n          validatedRecommendation:\n            $node[\"Validate & Parse Recommendation\"].json.recommendation\n            || $node[\"Validate & Parse Recommendation\"].json\n            || {}\n        })\n    }\n  ],\n\n  response_format: {\n    type: \"json_object\"\n  }\n}) }}",
+        "options": {}
+      },
+      "id": "cfd04a2b-d347-460b-b7a6-b7873373fdc4",
+      "name": "LLM Bank Report",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1680,
+        -272
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Split multipart uploads into one binary item per document.\n// React sends questionnaire JSON in `payload` and files in multipart `documents`.\nconst input = $input.first();\nconst body = input.json?.body ?? input.json ?? {};\nlet payload = body.payload ?? body;\nif (typeof payload === 'string') {\n  try { payload = JSON.parse(payload); } catch { payload = {}; }\n}\nconst binaries = input.binary || {};\nconst entries = Object.entries(binaries);\n\nconst supported = new Set(['txt','text','csv','pdf','xlsx','xls','ods','rtf','html','json','xml']);\n\nif (!entries.length) {\n  return [{ json: { ...payload, __hasUploads: false, __document: null } }];\n}\n\nconst out = [];\nfor (const [propertyName, binary] of entries) {\n  const fileName = binary?.fileName || propertyName;\n  const mimeType = binary?.mimeType || null;\n  const ext = String(fileName).split('.').pop().toLowerCase();\n  const operation = ext === 'text' ? 'text' : ext;\n  const extractionSupported = supported.has(operation);\n\n  out.push({\n    json: {\n      ...payload,\n      __hasUploads: true,\n      __document: {\n        fileName,\n        mimeType,\n        size: binary?.fileSize || null,\n        extractionOperation: operation,\n        extractionSupported,\n      },\n    },\n    binary: { data: binary },\n  });\n}\nreturn out;\n",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "9d03f645-f1a4-48b7-aefa-f26a466c9a83",
+      "name": "Prepare Uploaded Documents",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -384,
+        -272
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "hasupload",
+              "leftValue": "={{ $json.__hasUploads }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "6c58536b-d37d-41fe-ad49-314f7779dff4",
+      "name": "Uploaded Files?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -160,
+        -272
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Aggregate extracted documents back into one questionnaire payload.\n// Each extractor has a FIXED operation; routing happens before this node.\nconst items = $input.all();\nconst first = items[0]?.json || {};\nconst payload = { ...first };\ndelete payload.__document;\ndelete payload.__hasUploads;\n\nfunction num(v){\n  if(v === null || v === undefined || v === '') return null;\n  const n = Number(String(v).replace(/[₹,\\s]/g,''));\n  return Number.isFinite(n) ? n : null;\n}\nfunction field(field, value, source, confidence=0.82){\n  const n = num(value);\n  return { field, value: n ?? value, source, confidence };\n}\nfunction extractFields(text, fileName){\n  const t = String(text || '').replace(/\\r/g,'');\n  const fields=[];\n  const patterns=[\n    ['monthlyEMI',/(?:total\\s+)?monthly\\s+(?:emi|installment|instalment)\\s*[:=\\-]?\\s*[₹rs\\.\\s]*([\\d,]+(?:\\.\\d+)?)/i],\n    ['monthlyEMI',/emi\\s*(?:per\\s+month|monthly)?\\s*[:=\\-]?\\s*[₹rs\\.\\s]*([\\d,]+(?:\\.\\d+)?)/i],\n    ['totalOutstanding',/(?:total\\s+)?(?:outstanding|principal\\s+outstanding|loan\\s+outstanding)\\s*(?:amount)?\\s*[:=\\-]?\\s*[₹rs\\.\\s]*([\\d,]+(?:\\.\\d+)?)/i],\n    ['monthlySales',/(?:monthly\\s+)?(?:sales|revenue|turnover)\\s*(?:per\\s+month|monthly)?\\s*[:=\\-]?\\s*[₹rs\\.\\s]*([\\d,]+(?:\\.\\d+)?)/i],\n    ['monthlyExpenses',/(?:monthly\\s+)?(?:expenses|operating\\s+expenses|costs)\\s*(?:per\\s+month|monthly)?\\s*[:=\\-]?\\s*[₹rs\\.\\s]*([\\d,]+(?:\\.\\d+)?)/i],\n    ['receivables',/(?:accounts?\\s+receivable|receivables|customer\\s+dues|amount\\s+receivable)\\s*[:=\\-]?\\s*[₹rs\\.\\s]*([\\d,]+(?:\\.\\d+)?)/i],\n  ];\n  for(const [name,re] of patterns){\n    const m=t.match(re); if(m) fields.push(field(name,m[1],fileName,0.86));\n  }\n  const totalEmi=t.match(/total\\s+(?:monthly\\s+)?emi\\s*[:=\\-]?\\s*[₹rs\\.\\s]*([\\d,]+(?:\\.\\d+)?)/i);\n  if(totalEmi){ for(let i=fields.length-1;i>=0;i--) if(fields[i].field==='monthlyEMI') fields.splice(i,1); fields.push(field('monthlyEMI',totalEmi[1],fileName,0.94)); }\n  const totalOut=t.match(/total\\s+(?:loan\\s+)?outstanding\\s*(?:amount)?\\s*[:=\\-]?\\s*[₹rs\\.\\s]*([\\d,]+(?:\\.\\d+)?)/i);\n  if(totalOut) fields.push(field('totalOutstanding',totalOut[1],fileName,0.94));\n  return fields;\n}\n\nconst grouped=new Map();\nfunction getDoc(meta){\n  const key=meta.fileName || `document_${grouped.size+1}`;\n  if(!grouped.has(key)) grouped.set(key,{fileName:key,documentType:meta.extractionOperation||'unknown',mimeType:meta.mimeType||null,fields:[],extractionFailed:false});\n  return grouped.get(key);\n}\n\nfor(const item of items){\n  const j=item.json||{};\n  const meta=j.__document||{};\n  const doc=getDoc(meta);\n\n  if(meta.extractionSupported===false){\n    doc.extractionFailed=true;\n    doc.extractionError='Unsupported file type. Supported: PDF, XLSX, XLS, CSV, TXT, ODS, RTF, HTML, JSON, XML.';\n    continue;\n  }\n\n  let text='';\n  if(typeof j.text==='string') text=j.text;\n  else if(typeof j.data==='string') text=j.data;\n  else {\n    const clone={...j};\n    delete clone.__document; delete clone.__hasUploads;\n    text=JSON.stringify(clone);\n  }\n\n  if(text.trim()) doc.fields.push(...extractFields(text,doc.fileName));\n}\n\nfor(const doc of grouped.values()){\n  const best=new Map();\n  for(const f of doc.fields){ const old=best.get(f.field); if(!old || f.confidence>old.confidence) best.set(f.field,f); }\n  doc.fields=[...best.values()];\n  if(!doc.fields.length && !doc.extractionFailed){\n    doc.extractionFailed=true;\n    doc.extractionError='The document was extracted, but no supported financial fields were confidently identified.';\n  }\n}\n\npayload.documents=[...grouped.values()];\npayload.documentExtraction={\n  attempted:true,\n  documentCount:payload.documents.length,\n  successful:payload.documents.filter(d=>!d.extractionFailed).length,\n  failed:payload.documents.filter(d=>d.extractionFailed).length,\n};\nreturn [{json:payload}];\n",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "4dc5b9ac-afeb-491e-9863-96ca077b8b9a",
+      "name": "Aggregate Extracted Documents",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        288,
+        -368
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "1102532b-0112-425f-b9f0-55e1ef421994",
+              "leftValue": "={ $json.__document.extractionOperation }",
+              "rightValue": "text",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "df511d63-9670-4a79-bedf-6432d7681289",
+      "name": "Is TXT?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        700,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "text",
+        "binaryPropertyName": "data",
+        "options": {
+          "keepSource": "json"
+        }
+      },
+      "id": "e71ada5c-7696-4c9e-9591-339bbbe476eb",
+      "name": "Extract TXT",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        880,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "48db0fd2-472c-433d-8cbe-7c5772a27852",
+              "leftValue": "={ $json.__document.extractionOperation }",
+              "rightValue": "csv",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "447a26ab-4006-460d-937f-65a393066310",
+      "name": "Is CSV?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1060,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "csv",
+        "binaryPropertyName": "data",
+        "options": {
+          "keepSource": "json"
+        }
+      },
+      "id": "6bb73d82-7033-477f-b8d2-ad2eaa342e50",
+      "name": "Extract CSV",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        1240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "3fb3af9c-8ab8-42ef-ace9-c308a331b10d",
+              "leftValue": "={ $json.__document.extractionOperation }",
+              "rightValue": "pdf",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "8e758a49-5e75-4672-97f8-567fa23705a7",
+      "name": "Is PDF?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1420,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "binaryPropertyName": "data",
+        "options": {
+          "keepSource": "json"
+        }
+      },
+      "id": "e3139a9e-d889-4833-b16e-5d621065bcdb",
+      "name": "Extract PDF",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        1600,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "dc89c636-7aac-43ed-b969-413b4c594186",
+              "leftValue": "={ $json.__document.extractionOperation }",
+              "rightValue": "xlsx",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "82026f1c-83d0-45ac-b011-449474850e13",
+      "name": "Is XLSX?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1780,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "xlsx",
+        "binaryPropertyName": "data",
+        "options": {
+          "keepSource": "json"
+        }
+      },
+      "id": "25a01a12-a0f2-489b-a284-d95828237bf4",
+      "name": "Extract XLSX",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        1960,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "464d523d-2b1f-4bd2-91f8-f7286ab825d1",
+              "leftValue": "={ $json.__document.extractionOperation }",
+              "rightValue": "xls",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "e366bb44-82db-4a3a-aca5-72bf45092c7e",
+      "name": "Is XLS?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2140,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "xls",
+        "binaryPropertyName": "data",
+        "options": {
+          "keepSource": "json"
+        }
+      },
+      "id": "19bbef02-e9b9-4810-be14-3b26ff680762",
+      "name": "Extract XLS",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        2320,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "04374b99-924b-49e2-886c-27628f49c5c6",
+              "leftValue": "={ $json.__document.extractionOperation }",
+              "rightValue": "ods",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b4c71e5a-5196-4675-8eef-a74588fdcb08",
+      "name": "Is ODS?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2500,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "ods",
+        "binaryPropertyName": "data",
+        "options": {
+          "keepSource": "json"
+        }
+      },
+      "id": "1af88bf2-d5a4-4489-9971-0ca3d4727eba",
+      "name": "Extract ODS",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        2680,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "960bf9a6-7261-4708-aca6-1a94fc766a42",
+              "leftValue": "={ $json.__document.extractionOperation }",
+              "rightValue": "rtf",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "5abe4813-2734-4cfb-aa52-d08b89b1a755",
+      "name": "Is RTF?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2860,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "rtf",
+        "binaryPropertyName": "data",
+        "options": {
+          "keepSource": "json"
+        }
+      },
+      "id": "8a29243e-98c7-4c51-9917-1c2eba5340b6",
+      "name": "Extract RTF",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        3040,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "ceaacf89-80ea-4077-bcd7-19c2db9d6aa3",
+              "leftValue": "={ $json.__document.extractionOperation }",
+              "rightValue": "html",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "192d1b18-f226-4fdc-9649-bcf92bc9881f",
+      "name": "Is HTML?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "html",
+        "binaryPropertyName": "data",
+        "options": {
+          "keepSource": "json"
+        }
+      },
+      "id": "35594923-13dd-4afe-9c7c-4127c38844e6",
+      "name": "Extract HTML",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        3400,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "4b35a48c-f9d3-4dc3-bf17-2dee5fac1a6a",
+              "leftValue": "={ $json.__document.extractionOperation }",
+              "rightValue": "json",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "8c794ce0-4dc4-4ece-ac3d-b72baed07c27",
+      "name": "Is JSON?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3580,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "json",
+        "binaryPropertyName": "data",
+        "options": {
+          "keepSource": "json"
+        }
+      },
+      "id": "670936f1-cbd8-4bee-94e0-77e8591d3cb2",
+      "name": "Extract JSON",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        3760,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "348ee431-a62c-4140-b1de-c1e05846ff26",
+              "leftValue": "={ $json.__document.extractionOperation }",
+              "rightValue": "xml",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "0bd4d0e6-bb01-41bb-9ed8-994454ee9342",
+      "name": "Is XML?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3940,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "xml",
+        "binaryPropertyName": "data",
+        "options": {
+          "keepSource": "json"
+        }
+      },
+      "id": "8873f416-a358-467b-a774-8cda3405e497",
+      "name": "Extract XML",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        4120,
+        0
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Prepare Uploaded Documents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "01-03 Intake, Documents, Reconciliation": {
+      "main": [
+        [
+          {
+            "node": "Input Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Input Valid?": {
+      "main": [
+        [
+          {
+            "node": "Respond - Validation Error",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "04-06 Financial Engine, Scenarios, Diagnosis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "04-06 Financial Engine, Scenarios, Diagnosis": {
+      "main": [
+        [
+          {
+            "node": "Build Recommendation Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Recommendation Prompt": {
+      "main": [
+        [
+          {
+            "node": "LLM Recommendation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Parse Recommendation": {
+      "main": [
+        [
+          {
+            "node": "Build Bank Report Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Bank Report Prompt": {
+      "main": [
+        [
+          {
+            "node": "LLM Bank Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Parse Bank Report": {
+      "main": [
+        [
+          {
+            "node": "Assemble Final Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assemble Final Response": {
+      "main": [
+        [
+          {
+            "node": "Respond - Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Recommendation": {
+      "main": [
+        [
+          {
+            "node": "Validate & Parse Recommendation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Bank Report": {
+      "main": [
+        [
+          {
+            "node": "Validate & Parse Bank Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Uploaded Documents": {
+      "main": [
+        [
+          {
+            "node": "Uploaded Files?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Extracted Documents": {
+      "main": [
+        [
+          {
+            "node": "01-03 Intake, Documents, Reconciliation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Uploaded Files?": {
+      "main": [
+        [
+          {
+            "node": "Is TXT?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "01-03 Intake, Documents, Reconciliation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is TXT?": {
+      "main": [
+        [
+          {
+            "node": "Extract TXT",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Is CSV?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract TXT": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Extracted Documents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is CSV?": {
+      "main": [
+        [
+          {
+            "node": "Extract CSV",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Is PDF?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract CSV": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Extracted Documents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is PDF?": {
+      "main": [
+        [
+          {
+            "node": "Extract PDF",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Is XLSX?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract PDF": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Extracted Documents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is XLSX?": {
+      "main": [
+        [
+          {
+            "node": "Extract XLSX",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Is XLS?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract XLSX": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Extracted Documents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is XLS?": {
+      "main": [
+        [
+          {
+            "node": "Extract XLS",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Is ODS?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract XLS": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Extracted Documents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is ODS?": {
+      "main": [
+        [
+          {
+            "node": "Extract ODS",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Is RTF?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract ODS": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Extracted Documents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is RTF?": {
+      "main": [
+        [
+          {
+            "node": "Extract RTF",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Is HTML?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract RTF": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Extracted Documents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is HTML?": {
+      "main": [
+        [
+          {
+            "node": "Extract HTML",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Is JSON?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract HTML": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Extracted Documents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is JSON?": {
+      "main": [
+        [
+          {
+            "node": "Extract JSON",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Is XML?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract JSON": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Extracted Documents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is XML?": {
+      "main": [
+        [
+          {
+            "node": "Extract XML",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Aggregate Extracted Documents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract XML": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Extracted Documents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "f397f8cf-4103-4ae8-b38d-e02885d47b15",
+  "meta": {
+    "instanceId": "05c136cc20ece9b8ed1be587a892ef3ad00f921307e3dee288147329a2cf8f58"
+  },
+  "nodeGroups": [],
+  "id": "5iYMC5n9EbHTpI7A",
+  "tags": []
+}
