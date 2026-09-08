@@ -1,0 +1,18 @@
+FICTIONAL TEST DATA — NOT A REAL FINANCIAL RECORD
+==================================================
+GST SUMMARY (GSTR-3B extract) — Shree Balaji Engineering Works
+GSTIN: 27ABCDE1234F1Z5
+Period: Feb-2026 to Jul-2026 (6 months)
+
+Month       Reported Turnover (Taxable Value)
+Feb-2026    Rs. 19,40,000
+Mar-2026    Rs. 20,80,000
+Apr-2026    Rs. 21,10,000
+May-2026    Rs. 19,60,000
+Jun-2026    Rs. 20,20,000
+Jul-2026    Rs. 20,90,000
+
+Average Monthly Reported Turnover: ~Rs. 20,33,000
+
+NOTE: "Reported turnover" reflects invoiced sales, not cash actually received.
+Actual cash collection may lag reported turnover due to customer payment delays.
