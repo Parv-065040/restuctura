@@ -1,0 +1,14 @@
+FICTIONAL TEST DATA — NOT A REAL FINANCIAL RECORD
+DELIBERATELY INCONSISTENT — for reconciliation testing (TEST 8)
+==================================================
+HDFC BANK — BUSINESS LOAN STATEMENT (re-issued copy)
+Loan Account No: HBL-2024-771102
+Borrower: Shree Balaji Engineering Works
+
+NOTE: This copy shows a combined EMI figure that does NOT match what the
+owner entered in the questionnaire (Rs. 1,38,500 total across 3 loans).
+This document reports total monthly EMI obligation as Rs. 1,45,000 and
+total outstanding across all loans as Rs. 47,00,000.
+
+Expected system behaviour: flag a CONFLICT, do not silently overwrite the
+user's figure, and ask the owner to confirm before proceeding.

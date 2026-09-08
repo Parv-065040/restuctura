@@ -1,0 +1,20 @@
+[
+  {
+    "documentType": "loan_statement",
+    "fileName": "CONTRADICTION_loan_statement_hdfc_conflicting.txt",
+    "fields": [
+      {
+        "field": "monthlyEMI",
+        "value": 145000,
+        "source": "loan_statement",
+        "confidence": "HIGH"
+      },
+      {
+        "field": "totalOutstanding",
+        "value": 4700000,
+        "source": "loan_statement",
+        "confidence": "HIGH"
+      }
+    ]
+  }
+]
