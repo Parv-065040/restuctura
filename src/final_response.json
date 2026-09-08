@@ -1,0 +1,837 @@
+[
+  {
+    "status": "SUCCESS",
+    "success": true,
+    "validationPassed": true,
+    "errors": [],
+    "warnings": [],
+    "business": {
+      "name": "Shree Balaji Engineering Works",
+      "analysisDate": "2026-09-03"
+    },
+    "executiveSummary": "Shree Balaji Engineering Works is a manufacturing business with reported monthly sales of ₹20,00,000 and reported monthly expenses of ₹16,80,000. Reported receivables total ₹9,50,000, and customers are reported as paying late. Current monthly EMI across the reported loans is ₹1,38,500.",
+    "dashboard": {
+      "businessName": "Shree Balaji Engineering Works",
+      "analysisDate": "2026-09-03",
+      "financialHealth": {
+        "monthlySales": 2000000,
+        "monthlyExpenses": 1680000,
+        "cashReserve": 350000,
+        "receivables": 950000,
+        "totalMonthlyEMI": 138500,
+        "totalOutstandingDebt": 4600000,
+        "availableAfterExpenses": 320000,
+        "availableAfterEMI": 181500,
+        "internalDSCR": 2.31,
+        "emiToSalesRatio": 0.07,
+        "emiToAvailableRatio": 0.43,
+        "cashReserveCoverageMonths": 2.53,
+        "receivablesRatio": 0.48,
+        "debtConcentration": "CONCENTRATED",
+        "weightedAvgInterestRate": 13.96,
+        "weightedAvgTenureMonths": 33
+      },
+      "stressDiagnosis": {
+        "classifications": [
+          "WATCH",
+          "TEMPORARY_LIQUIDITY_STRESS",
+          "MULTIPLE_LOAN_COMPLEXITY"
+        ],
+        "currentSurplus": null,
+        "stressSurplus": null,
+        "recoverySurplus": null,
+        "stressRevenueChangePct": -20,
+        "recoveryRevenueChangePct": 15
+      },
+      "restructuring": {
+        "recommendedOption": "Extend loan tenure by 50%",
+        "recommendedScenario": null
+      },
+      "confidence": {
+        "score": 95,
+        "level": "HIGH"
+      }
+    },
+    "financialSnapshot": {
+      "monthlySales": 2000000,
+      "monthlyExpenses": 1680000,
+      "cashReserve": 350000,
+      "receivables": 950000,
+      "customersPayingLate": "Yes",
+      "loans": [
+        {
+          "id": "loan_1",
+          "lender": "HDFC Bank",
+          "loanType": "Business loan",
+          "outstandingAmount": 2800000,
+          "emi": 78500,
+          "remainingTenureMonths": 36,
+          "interestRatePct": 13.5,
+          "secured": "Yes"
+        },
+        {
+          "id": "loan_2",
+          "lender": "Bajaj Finserv",
+          "loanType": "Machinery/equipment loan",
+          "outstandingAmount": 1200000,
+          "emi": 42000,
+          "remainingTenureMonths": 30,
+          "interestRatePct": 15,
+          "secured": "Yes"
+        },
+        {
+          "id": "loan_3",
+          "lender": "ICICI Bank",
+          "loanType": "Cash credit/overdraft",
+          "outstandingAmount": 600000,
+          "emi": 18000,
+          "remainingTenureMonths": 24,
+          "interestRatePct": 14,
+          "secured": "No"
+        }
+      ],
+      "totalMonthlyEMI": 138500,
+      "totalOutstandingDebt": 4600000,
+      "availableAfterExpenses": 320000,
+      "availableAfterEMI": 181500,
+      "internalDSCR": 2.31,
+      "emiToSalesRatio": 0.07,
+      "emiToAvailableRatio": 0.43,
+      "cashReserveCoverageMonths": 2.53,
+      "receivablesRatio": 0.48,
+      "debtConcentration": "CONCENTRATED",
+      "weightedAvgInterestRate": 13.96,
+      "weightedAvgTenureMonths": 33,
+      "comfortableEMIRange": {
+        "lower": 128000,
+        "upper": 176000,
+        "basis": "Illustrative safety-cushion calculation: 40%-55% of estimated money left after business expenses. Not a lender-approved affordability limit."
+      }
+    },
+    "scenarios": {
+      "scenarios": {
+        "current": {
+          "label": "Current repayment (no change)",
+          "emi": 138500,
+          "tenureMonths": 33,
+          "estimatedRemainingRepayment": 4570500,
+          "monthlySurplusDeficit": {
+            "base": 181500,
+            "stress": -218500,
+            "recovery": 481500
+          },
+          "note": "Reflects the loan terms as currently reported."
+        },
+        "longerRepayment": {
+          "extend_25pct": {
+            "label": "Extend remaining tenure by 25%",
+            "newTenureMonths": 41,
+            "newEMI": 141709.98,
+            "emiReduction": -3209.98,
+            "estimatedAdditionalInterest": 1239609.18,
+            "monthlySurplusDeficit": {
+              "base": 178290.02,
+              "stress": -221709.98,
+              "recovery": 478290.02
+            },
+            "disclaimer": "Illustrative scenario only. Actual terms depend on lender approval."
+          },
+          "extend_50pct": {
+            "label": "Extend remaining tenure by 50%",
+            "newTenureMonths": 50,
+            "newEMI": 121855.45,
+            "emiReduction": 16644.55,
+            "estimatedAdditionalInterest": 1522272.5,
+            "monthlySurplusDeficit": {
+              "base": 198144.55,
+              "stress": -201855.45,
+              "recovery": 498144.55
+            },
+            "disclaimer": "Illustrative scenario only. Actual terms depend on lender approval."
+          },
+          "extend_100pct": {
+            "label": "Extend remaining tenure by 100%",
+            "newTenureMonths": 66,
+            "newEMI": 100229.85,
+            "emiReduction": 38270.15,
+            "estimatedAdditionalInterest": 2044670.1,
+            "monthlySurplusDeficit": {
+              "base": 219770.15,
+              "stress": -180229.85,
+              "recovery": 519770.15
+            },
+            "disclaimer": "Illustrative scenario only. Actual terms depend on lender approval."
+          },
+          "default": "extend_50pct"
+        },
+        "temporaryRelief": {
+          "label": "3-month illustrative payment relief",
+          "reliefMonths": 3,
+          "paymentDuringRelief": 0,
+          "assumedInterestTreatment": "Interest continues to accrue during relief and is added to outstanding principal.",
+          "accruedInterestDuringRelief": 160540,
+          "postReliefEMI": 174543.99,
+          "postReliefTenureMonths": 33,
+          "totalTimelineMonths": 36,
+          "monthlySurplusDeficitDuringRelief": {
+            "base": 320000,
+            "stress": -80000,
+            "recovery": 620000
+          },
+          "monthlySurplusDeficitAfterRelief": {
+            "base": 145456.01,
+            "stress": -254543.99,
+            "recovery": 445456.01
+          },
+          "disclaimer": "Illustrative scenario only. The lender may or may not offer this exact structure."
+        },
+        "stepDown": {
+          "label": "Reduced EMI for 6 months, then step up",
+          "stepMonths": 6,
+          "reducedEMI": 83100,
+          "subsequentEMI": 191807.27,
+          "subsequentTenureMonths": 27,
+          "totalTimelineMonths": 33,
+          "monthlySurplusDeficitDuringStep": {
+            "base": 236900,
+            "stress": -163100,
+            "recovery": 536900
+          },
+          "monthlySurplusDeficitAfterStep": {
+            "base": 128192.73,
+            "stress": -271807.27,
+            "recovery": 428192.73
+          },
+          "simplification": "Principal/interest split during the step-down period is approximated, not a full amortization schedule.",
+          "disclaimer": "Illustrative scenario only. Actual terms depend on lender approval."
+        },
+        "consolidation": {
+          "label": "Consolidate all loans into a single facility",
+          "consolidatedOutstanding": 4600000,
+          "consolidatedEMI": 157127.74,
+          "consolidatedTenureMonths": 36,
+          "emiReduction": -18627.74,
+          "emiReductionPct": -13.45,
+          "recommended": false,
+          "monthlySurplusDeficit": {
+            "base": 162872.26,
+            "stress": -237127.74,
+            "recovery": 462872.26
+          },
+          "note": "Calculated benefit is not large enough to recommend consolidation on its own.",
+          "disclaimer": "Illustrative scenario only. Actual consolidated terms depend on lender approval."
+        }
+      },
+      "stressAssumptions": {
+        "stressRevenueChangePct": -20,
+        "recoveryRevenueChangePct": 15,
+        "expensesHeldConstant": true
+      }
+    },
+    "recommendation": {
+      "summaryForOwner": "Your business shows healthy cash flow after expenses but the loans are creating pressure, especially when customers delay payments. Extending the repayment period for your existing loans can lower the monthly payment and give you more breathing room. Consider this option first, while also exploring short‑term relief if needed.",
+      "primaryRecommendation": {
+        "title": "Extend loan tenure by 50%",
+        "explanation": "Ask your lenders to extend the remaining loan tenure by 50% (to 50 months). This would reduce the total monthly EMI to 121855.45, giving you a larger monthly surplus of 198144.55 under normal revenue conditions.",
+        "supportingNumbers": [
+          "newEMI 121855.45",
+          "newTenureMonths 50",
+          "monthlySurplusDeficit base 198144.55"
+        ]
+      },
+      "alternativeOptions": [
+        {
+          "title": "3‑month temporary payment relief",
+          "explanation": "Pause EMI payments for three months; interest of 160540 will be added to the loan. After relief, the EMI becomes 174543.99, still leaving a base surplus of 145456.01."
+        },
+        {
+          "title": "Step‑down EMI plan (6 months low EMI then higher)",
+          "explanation": "Pay a reduced EMI of 83100 for six months, then resume a higher EMI of 191807.27. During the low‑EMI period you would have a base surplus of 236900."
+        }
+      ],
+      "notPreferredOptions": [
+        {
+          "title": "Consolidate all loans into a single facility",
+          "reasonNotPreferred": "The consolidated EMI of 157127.74 only improves surplus to 162872.26, a modest benefit that does not outweigh the added complexity and higher payment."
+        }
+      ],
+      "risksAndTradeoffs": [
+        "Extending tenure increases total interest paid (additional interest 1522272.5).",
+        "Longer loan duration ties up cash flow for more years.",
+        "Temporary relief may cause a larger EMI later (174543.99) and higher total interest (160540 accrued during relief)."
+      ],
+      "technicalDetails": {
+        "internalDSCR": 2.31,
+        "emiToAvailableRatio": 0.43,
+        "note": "DSCR and ratios are based on the current financial snapshot; they do not guarantee lender approval."
+      },
+      "disclaimer": "This recommendation is an illustrative estimate based on the provided data and is not a lender decision, approval, or guarantee."
+    },
+    "actionPlan": {
+      "primaryAction": "Extend loan tenure by 50%",
+      "explanation": "Ask your lenders to extend the remaining loan tenure by 50% (to 50 months). This would reduce the total monthly EMI to 121855.45, giving you a larger monthly surplus of 198144.55 under normal revenue conditions.",
+      "alternativeOptions": [
+        {
+          "title": "3‑month temporary payment relief",
+          "explanation": "Pause EMI payments for three months; interest of 160540 will be added to the loan. After relief, the EMI becomes 174543.99, still leaving a base surplus of 145456.01."
+        },
+        {
+          "title": "Step‑down EMI plan (6 months low EMI then higher)",
+          "explanation": "Pay a reduced EMI of 83100 for six months, then resume a higher EMI of 191807.27. During the low‑EMI period you would have a base surplus of 236900."
+        }
+      ],
+      "risksAndTradeoffs": [
+        "Extending tenure increases total interest paid (additional interest 1522272.5).",
+        "Longer loan duration ties up cash flow for more years.",
+        "Temporary relief may cause a larger EMI later (174543.99) and higher total interest (160540 accrued during relief)."
+      ],
+      "lenderDiscussionPoints": []
+    },
+    "bankReport": {
+      "businessName": "Shree Balaji Engineering Works",
+      "date": "2026-09-03",
+      "executiveSummary": "Shree Balaji Engineering Works is a manufacturing business with reported monthly sales of ₹20,00,000 and reported monthly expenses of ₹16,80,000. Reported receivables total ₹9,50,000, and customers are reported as paying late. Current monthly EMI across the reported loans is ₹1,38,500.",
+      "currentFinancialSnapshot": {
+        "monthlySales": 2000000,
+        "monthlyExpenses": 1680000,
+        "cashReserve": 350000,
+        "receivables": 950000,
+        "customersPayingLate": "Yes",
+        "loans": [
+          {
+            "id": "loan_1",
+            "lender": "HDFC Bank",
+            "loanType": "Business loan",
+            "outstandingAmount": 2800000,
+            "emi": 78500,
+            "remainingTenureMonths": 36,
+            "interestRatePct": 13.5,
+            "secured": "Yes"
+          },
+          {
+            "id": "loan_2",
+            "lender": "Bajaj Finserv",
+            "loanType": "Machinery/equipment loan",
+            "outstandingAmount": 1200000,
+            "emi": 42000,
+            "remainingTenureMonths": 30,
+            "interestRatePct": 15,
+            "secured": "Yes"
+          },
+          {
+            "id": "loan_3",
+            "lender": "ICICI Bank",
+            "loanType": "Cash credit/overdraft",
+            "outstandingAmount": 600000,
+            "emi": 18000,
+            "remainingTenureMonths": 24,
+            "interestRatePct": 14,
+            "secured": "No"
+          }
+        ],
+        "totalMonthlyEMI": 138500,
+        "totalOutstandingDebt": 4600000,
+        "availableAfterExpenses": 320000,
+        "availableAfterEMI": 181500,
+        "internalDSCR": 2.31,
+        "emiToSalesRatio": 0.07,
+        "emiToAvailableRatio": 0.43,
+        "cashReserveCoverageMonths": 2.53,
+        "receivablesRatio": 0.48,
+        "debtConcentration": "CONCENTRATED",
+        "weightedAvgInterestRate": 13.96,
+        "weightedAvgTenureMonths": 33,
+        "comfortableEMIRange": {
+          "lower": 128000,
+          "upper": 176000,
+          "basis": "Illustrative safety-cushion calculation: 40%-55% of estimated money left after business expenses. Not a lender-approved affordability limit."
+        }
+      },
+      "keyIssues": [
+        "Reported receivables total ₹9,50,000, and customers are reported as paying late.",
+        "Current total monthly EMI is ₹1,38,500 across 3 reported loans.",
+        "Current base-case cash-flow headroom after EMI is ₹1,81,500.",
+        "A -20% revenue stress illustration produces a negative monthly surplus/deficit of ₹-2,18,500 under the current repayment structure."
+      ],
+      "proposedRestructuringOptions": [
+        {
+          "option": "Extend loan tenure by 50%",
+          "status": "Primary illustrative option",
+          "newTenureMonths": 50,
+          "newEMI": 121855.45,
+          "EMIChange": 16644.55,
+          "estimatedAdditionalInterest": 1522272.5,
+          "monthlySurplusBase": 198144.55,
+          "monthlySurplusStress": -201855.45,
+          "monthlySurplusRecovery": 498144.55,
+          "rationale": "This illustrative scenario lowers the monthly EMI and increases base-case cash-flow headroom.",
+          "lenderNote": "Option to discuss with the lender; actual terms depend on lender approval."
+        },
+        {
+          "option": "3-month temporary payment relief",
+          "status": "Alternative illustrative option",
+          "reliefMonths": 3,
+          "paymentDuringRelief": 0,
+          "accruedInterestDuringRelief": 160540,
+          "postReliefEMI": 174543.99,
+          "monthlySurplusDuringReliefBase": 320000,
+          "monthlySurplusAfterReliefBase": 145456.01,
+          "lenderNote": "Illustrative scenario only. The lender may or may not offer this exact structure."
+        },
+        {
+          "option": "Reduced EMI for 6 months, then step up",
+          "status": "Alternative illustrative option",
+          "stepMonths": 6,
+          "reducedEMI": 83100,
+          "subsequentEMI": 191807.27,
+          "monthlySurplusDuringStepBase": 236900,
+          "monthlySurplusAfterStepBase": 128192.73,
+          "lenderNote": "Illustrative scenario only. Actual terms depend on lender approval."
+        }
+      ],
+      "alternativeOptionNotPreferred": [
+        {
+          "title": "Consolidate all loans into a single facility",
+          "reason": "Calculated benefit is not large enough to recommend consolidation on its own.",
+          "consolidatedEMI": 157127.74,
+          "monthlySurplusBase": 162872.26
+        }
+      ],
+      "riskAssessment": [
+        "The 50% tenure-extension scenario increases estimated additional interest by ₹15,22,272.5.",
+        "The downside stress scenario remains negative at ₹-2,01,855.45 per month.",
+        "The restructuring improves base-case cash-flow headroom but does not eliminate downside risk.",
+        "Actual restructuring terms depend on lender assessment, approval, and contractual terms."
+      ],
+      "requiredDocumentation": [
+        "Last 6 months bank statement — supplied.",
+        "Loan statement for HDFC Bank — supplied.",
+        "Loan statement for Bajaj Finserv — supplied.",
+        "Loan statement for ICICI Bank — supplied.",
+        "GST sales summary — supplied.",
+        "Receivables list — supplied.",
+        "Additional cash-flow projection for the chosen restructuring option, if available."
+      ],
+      "nextSteps": [
+        "Prepare a formal restructuring request outlining the preferred 50% tenure‑extension option.",
+        "Gather and organize the supplied loan statements, bank statement, GST sales summary, and receivables list for lender review.",
+        "If needed, prepare additional documentation such as cash‑flow projections and a brief on customer payment patterns.",
+        "Discuss the preferred illustrative option with lenders soon, given the stated 1‑3 month urgency.",
+        "Compare any lender‑provided terms against the illustrative scenarios before finalizing an agreement."
+      ],
+      "disclaimer": "This is illustrative financial decision-support only. It is not a lender decision, loan approval, financial offer, guarantee, or financial advice. Actual restructuring terms depend on lender assessment, approval, and contractual terms."
+    },
+    "documentationChecklist": [
+      "Last 6 months bank statement — supplied.",
+      "Loan statement for HDFC Bank — supplied.",
+      "Loan statement for Bajaj Finserv — supplied.",
+      "Loan statement for ICICI Bank — supplied.",
+      "GST sales summary — supplied.",
+      "Receivables list — supplied.",
+      "Additional cash-flow projection for the chosen restructuring option, if available."
+    ],
+    "classifications": [
+      "WATCH",
+      "TEMPORARY_LIQUIDITY_STRESS",
+      "MULTIPLE_LOAN_COMPLEXITY"
+    ],
+    "reconciliation": {
+      "results": [
+        {
+          "documentType": "bank_statement",
+          "fileName": "bank_statement_6month.txt",
+          "conflicts": [],
+          "confirmations": [],
+          "hasConflicts": false,
+          "extractionFailed": false
+        },
+        {
+          "documentType": "loan_statement",
+          "fileName": "loan_statement_hdfc.txt",
+          "conflicts": [],
+          "confirmations": [],
+          "hasConflicts": false,
+          "extractionFailed": false
+        },
+        {
+          "documentType": "loan_statement",
+          "fileName": "loan_statement_bajaj.txt",
+          "conflicts": [],
+          "confirmations": [],
+          "hasConflicts": false,
+          "extractionFailed": false
+        },
+        {
+          "documentType": "loan_statement",
+          "fileName": "loan_statement_icici.txt",
+          "conflicts": [],
+          "confirmations": [],
+          "hasConflicts": false,
+          "extractionFailed": false
+        },
+        {
+          "documentType": "gst_sales_summary",
+          "fileName": "gst_sales_summary.txt",
+          "conflicts": [],
+          "confirmations": [],
+          "hasConflicts": false,
+          "extractionFailed": false
+        },
+        {
+          "documentType": "receivables_list",
+          "fileName": "receivables_list.txt",
+          "conflicts": [],
+          "confirmations": [],
+          "hasConflicts": false,
+          "extractionFailed": false
+        }
+      ],
+      "hasConflict": false,
+      "conflicts": []
+    },
+    "dataConfidence": {
+      "score": 95,
+      "level": "HIGH",
+      "note": "Confidence reflects the completeness and consistency of the supplied information. It does not mean the financial analysis is guaranteed to be correct."
+    },
+    "detailedFinancialView": {
+      "engine": {
+        "totalMonthlyEMI": 138500,
+        "totalOutstandingDebt": 4600000,
+        "missingEMICount": 0,
+        "availableAfterExpenses": 320000,
+        "availableAfterEMI": 181500,
+        "internalDSCR": 2.31,
+        "emiToSalesRatio": 0.07,
+        "emiToAvailableRatio": 0.43,
+        "cashReserveCoverageMonths": 2.53,
+        "receivablesRatio": 0.48,
+        "debtConcentration": "CONCENTRATED",
+        "weightedAvgInterestRate": 13.96,
+        "interestRateAssumed": false,
+        "weightedAvgTenureMonths": 33,
+        "tenureAssumed": false,
+        "comfortableEMIRange": {
+          "lower": 128000,
+          "upper": 176000,
+          "basis": "Illustrative safety-cushion calculation: 40%-55% of estimated money left after business expenses. Not a lender-approved affordability limit."
+        }
+      },
+      "financialSnapshot": {
+        "monthlySales": 2000000,
+        "monthlyExpenses": 1680000,
+        "cashReserve": 350000,
+        "receivables": 950000,
+        "customersPayingLate": "Yes",
+        "loans": [
+          {
+            "id": "loan_1",
+            "lender": "HDFC Bank",
+            "loanType": "Business loan",
+            "outstandingAmount": 2800000,
+            "emi": 78500,
+            "remainingTenureMonths": 36,
+            "interestRatePct": 13.5,
+            "secured": "Yes"
+          },
+          {
+            "id": "loan_2",
+            "lender": "Bajaj Finserv",
+            "loanType": "Machinery/equipment loan",
+            "outstandingAmount": 1200000,
+            "emi": 42000,
+            "remainingTenureMonths": 30,
+            "interestRatePct": 15,
+            "secured": "Yes"
+          },
+          {
+            "id": "loan_3",
+            "lender": "ICICI Bank",
+            "loanType": "Cash credit/overdraft",
+            "outstandingAmount": 600000,
+            "emi": 18000,
+            "remainingTenureMonths": 24,
+            "interestRatePct": 14,
+            "secured": "No"
+          }
+        ],
+        "totalMonthlyEMI": 138500,
+        "totalOutstandingDebt": 4600000,
+        "availableAfterExpenses": 320000,
+        "availableAfterEMI": 181500,
+        "internalDSCR": 2.31,
+        "emiToSalesRatio": 0.07,
+        "emiToAvailableRatio": 0.43,
+        "cashReserveCoverageMonths": 2.53,
+        "receivablesRatio": 0.48,
+        "debtConcentration": "CONCENTRATED",
+        "weightedAvgInterestRate": 13.96,
+        "weightedAvgTenureMonths": 33,
+        "comfortableEMIRange": {
+          "lower": 128000,
+          "upper": 176000,
+          "basis": "Illustrative safety-cushion calculation: 40%-55% of estimated money left after business expenses. Not a lender-approved affordability limit."
+        }
+      },
+      "scenarios": {
+        "scenarios": {
+          "current": {
+            "label": "Current repayment (no change)",
+            "emi": 138500,
+            "tenureMonths": 33,
+            "estimatedRemainingRepayment": 4570500,
+            "monthlySurplusDeficit": {
+              "base": 181500,
+              "stress": -218500,
+              "recovery": 481500
+            },
+            "note": "Reflects the loan terms as currently reported."
+          },
+          "longerRepayment": {
+            "extend_25pct": {
+              "label": "Extend remaining tenure by 25%",
+              "newTenureMonths": 41,
+              "newEMI": 141709.98,
+              "emiReduction": -3209.98,
+              "estimatedAdditionalInterest": 1239609.18,
+              "monthlySurplusDeficit": {
+                "base": 178290.02,
+                "stress": -221709.98,
+                "recovery": 478290.02
+              },
+              "disclaimer": "Illustrative scenario only. Actual terms depend on lender approval."
+            },
+            "extend_50pct": {
+              "label": "Extend remaining tenure by 50%",
+              "newTenureMonths": 50,
+              "newEMI": 121855.45,
+              "emiReduction": 16644.55,
+              "estimatedAdditionalInterest": 1522272.5,
+              "monthlySurplusDeficit": {
+                "base": 198144.55,
+                "stress": -201855.45,
+                "recovery": 498144.55
+              },
+              "disclaimer": "Illustrative scenario only. Actual terms depend on lender approval."
+            },
+            "extend_100pct": {
+              "label": "Extend remaining tenure by 100%",
+              "newTenureMonths": 66,
+              "newEMI": 100229.85,
+              "emiReduction": 38270.15,
+              "estimatedAdditionalInterest": 2044670.1,
+              "monthlySurplusDeficit": {
+                "base": 219770.15,
+                "stress": -180229.85,
+                "recovery": 519770.15
+              },
+              "disclaimer": "Illustrative scenario only. Actual terms depend on lender approval."
+            },
+            "default": "extend_50pct"
+          },
+          "temporaryRelief": {
+            "label": "3-month illustrative payment relief",
+            "reliefMonths": 3,
+            "paymentDuringRelief": 0,
+            "assumedInterestTreatment": "Interest continues to accrue during relief and is added to outstanding principal.",
+            "accruedInterestDuringRelief": 160540,
+            "postReliefEMI": 174543.99,
+            "postReliefTenureMonths": 33,
+            "totalTimelineMonths": 36,
+            "monthlySurplusDeficitDuringRelief": {
+              "base": 320000,
+              "stress": -80000,
+              "recovery": 620000
+            },
+            "monthlySurplusDeficitAfterRelief": {
+              "base": 145456.01,
+              "stress": -254543.99,
+              "recovery": 445456.01
+            },
+            "disclaimer": "Illustrative scenario only. The lender may or may not offer this exact structure."
+          },
+          "stepDown": {
+            "label": "Reduced EMI for 6 months, then step up",
+            "stepMonths": 6,
+            "reducedEMI": 83100,
+            "subsequentEMI": 191807.27,
+            "subsequentTenureMonths": 27,
+            "totalTimelineMonths": 33,
+            "monthlySurplusDeficitDuringStep": {
+              "base": 236900,
+              "stress": -163100,
+              "recovery": 536900
+            },
+            "monthlySurplusDeficitAfterStep": {
+              "base": 128192.73,
+              "stress": -271807.27,
+              "recovery": 428192.73
+            },
+            "simplification": "Principal/interest split during the step-down period is approximated, not a full amortization schedule.",
+            "disclaimer": "Illustrative scenario only. Actual terms depend on lender approval."
+          },
+          "consolidation": {
+            "label": "Consolidate all loans into a single facility",
+            "consolidatedOutstanding": 4600000,
+            "consolidatedEMI": 157127.74,
+            "consolidatedTenureMonths": 36,
+            "emiReduction": -18627.74,
+            "emiReductionPct": -13.45,
+            "recommended": false,
+            "monthlySurplusDeficit": {
+              "base": 162872.26,
+              "stress": -237127.74,
+              "recovery": 462872.26
+            },
+            "note": "Calculated benefit is not large enough to recommend consolidation on its own.",
+            "disclaimer": "Illustrative scenario only. Actual consolidated terms depend on lender approval."
+          }
+        },
+        "stressAssumptions": {
+          "stressRevenueChangePct": -20,
+          "recoveryRevenueChangePct": 15,
+          "expensesHeldConstant": true
+        }
+      },
+      "reconciliation": {
+        "results": [
+          {
+            "documentType": "bank_statement",
+            "fileName": "bank_statement_6month.txt",
+            "conflicts": [],
+            "confirmations": [],
+            "hasConflicts": false,
+            "extractionFailed": false
+          },
+          {
+            "documentType": "loan_statement",
+            "fileName": "loan_statement_hdfc.txt",
+            "conflicts": [],
+            "confirmations": [],
+            "hasConflicts": false,
+            "extractionFailed": false
+          },
+          {
+            "documentType": "loan_statement",
+            "fileName": "loan_statement_bajaj.txt",
+            "conflicts": [],
+            "confirmations": [],
+            "hasConflicts": false,
+            "extractionFailed": false
+          },
+          {
+            "documentType": "loan_statement",
+            "fileName": "loan_statement_icici.txt",
+            "conflicts": [],
+            "confirmations": [],
+            "hasConflicts": false,
+            "extractionFailed": false
+          },
+          {
+            "documentType": "gst_sales_summary",
+            "fileName": "gst_sales_summary.txt",
+            "conflicts": [],
+            "confirmations": [],
+            "hasConflicts": false,
+            "extractionFailed": false
+          },
+          {
+            "documentType": "receivables_list",
+            "fileName": "receivables_list.txt",
+            "conflicts": [],
+            "confirmations": [],
+            "hasConflicts": false,
+            "extractionFailed": false
+          }
+        ],
+        "hasConflict": false,
+        "conflicts": []
+      },
+      "classifications": [
+        "WATCH",
+        "TEMPORARY_LIQUIDITY_STRESS",
+        "MULTIPLE_LOAN_COMPLEXITY"
+      ],
+      "dataConfidence": {
+        "score": 95,
+        "level": "HIGH",
+        "note": "Confidence reflects the completeness and consistency of the supplied information. It does not mean the financial analysis is guaranteed to be correct."
+      },
+      "recommendation": {
+        "summaryForOwner": "Your business shows healthy cash flow after expenses but the loans are creating pressure, especially when customers delay payments. Extending the repayment period for your existing loans can lower the monthly payment and give you more breathing room. Consider this option first, while also exploring short‑term relief if needed.",
+        "primaryRecommendation": {
+          "title": "Extend loan tenure by 50%",
+          "explanation": "Ask your lenders to extend the remaining loan tenure by 50% (to 50 months). This would reduce the total monthly EMI to 121855.45, giving you a larger monthly surplus of 198144.55 under normal revenue conditions.",
+          "supportingNumbers": [
+            "newEMI 121855.45",
+            "newTenureMonths 50",
+            "monthlySurplusDeficit base 198144.55"
+          ]
+        },
+        "alternativeOptions": [
+          {
+            "title": "3‑month temporary payment relief",
+            "explanation": "Pause EMI payments for three months; interest of 160540 will be added to the loan. After relief, the EMI becomes 174543.99, still leaving a base surplus of 145456.01."
+          },
+          {
+            "title": "Step‑down EMI plan (6 months low EMI then higher)",
+            "explanation": "Pay a reduced EMI of 83100 for six months, then resume a higher EMI of 191807.27. During the low‑EMI period you would have a base surplus of 236900."
+          }
+        ],
+        "notPreferredOptions": [
+          {
+            "title": "Consolidate all loans into a single facility",
+            "reasonNotPreferred": "The consolidated EMI of 157127.74 only improves surplus to 162872.26, a modest benefit that does not outweigh the added complexity and higher payment."
+          }
+        ],
+        "risksAndTradeoffs": [
+          "Extending tenure increases total interest paid (additional interest 1522272.5).",
+          "Longer loan duration ties up cash flow for more years.",
+          "Temporary relief may cause a larger EMI later (174543.99) and higher total interest (160540 accrued during relief)."
+        ],
+        "technicalDetails": {
+          "internalDSCR": 2.31,
+          "emiToAvailableRatio": 0.43,
+          "note": "DSCR and ratios are based on the current financial snapshot; they do not guarantee lender approval."
+        },
+        "disclaimer": "This recommendation is an illustrative estimate based on the provided data and is not a lender decision, approval, or guarantee."
+      }
+    },
+    "validationSummary": {
+      "passed": true,
+      "upstreamValidationPassed": true,
+      "bankReportAvailable": true,
+      "recommendationAvailable": true,
+      "recommendationValid": true,
+      "financialEngineAvailable": true,
+      "scenariosAvailable": true,
+      "missingCriticalFinancialFields": [],
+      "reconciliationHasConflict": false
+    },
+    "debug": {
+      "engineNodeKeys": [
+        "data",
+        "validation",
+        "reconciliationResults",
+        "fin",
+        "scenarioBundle",
+        "classifications",
+        "dataConfidence"
+      ],
+      "engineFinAvailable": true,
+      "classificationsRecovered": true,
+      "classificationCount": 3,
+      "reconciliationRecovered": true,
+      "reconciliationResultCount": 6,
+      "reconciliationConflict": false,
+      "financialEngineRecovered": true,
+      "recommendationRecovered": true,
+      "bankReportRecovered": true,
+      "sourceDataRecovered": true,
+      "financialSnapshotRecovered": true,
+      "criticalFinancialFieldsPresent": true,
+      "finalValidation": true
+    },
+    "disclaimer": "RESTRUCTRA provides illustrative decision-support based on supplied information and deterministic calculations. It is not a lender decision, approval, offer, guarantee, or financial advice."
+  }
+]
